@@ -1,0 +1,13 @@
+appId: com.claudetex.app
+productName: ClaudeTeX
+directories:
+  buildResources: resources
+  output: dist
+files:
+  - out/**/*
+  - "!node_modules/**/*"
+mac:
+  target:
+    - dmg
+  category: public.app-category.productivity
+  artifactName: ${name}-${version}-${arch}.${ext}
