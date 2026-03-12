@@ -144,6 +144,33 @@ const api = {
   syncContentChanged: (docId: string, content: string) =>
     ipcRenderer.invoke('sync:contentChanged', docId, content),
 
+  // Cursor tracking
+  cursorUpdate: (docId: string, row: number, column: number) =>
+    ipcRenderer.invoke('cursor:update', docId, row, column),
+  cursorGetConnectedUsers: () =>
+    ipcRenderer.invoke('cursor:getConnectedUsers') as Promise<unknown[]>,
+  onCursorRemoteUpdate: (cb: (data: unknown) => void) => {
+    const handler = (_e: Electron.IpcRendererEvent, data: unknown) => cb(data)
+    ipcRenderer.on('cursor:remoteUpdate', handler)
+    return () => ipcRenderer.removeListener('cursor:remoteUpdate', handler)
+  },
+  onCursorRemoteDisconnected: (cb: (clientId: string) => void) => {
+    const handler = (_e: Electron.IpcRendererEvent, clientId: string) => cb(clientId)
+    ipcRenderer.on('cursor:remoteDisconnected', handler)
+    return () => ipcRenderer.removeListener('cursor:remoteDisconnected', handler)
+  },
+
+  // Chat
+  chatGetMessages: (projectId: string, limit?: number) =>
+    ipcRenderer.invoke('chat:getMessages', projectId, limit) as Promise<{ success: boolean; messages: unknown[] }>,
+  chatSendMessage: (projectId: string, content: string) =>
+    ipcRenderer.invoke('chat:sendMessage', projectId, content) as Promise<{ success: boolean }>,
+  onChatMessage: (cb: (msg: unknown) => void) => {
+    const handler = (_e: Electron.IpcRendererEvent, msg: unknown) => cb(msg)
+    ipcRenderer.on('chat:newMessage', handler)
+    return () => ipcRenderer.removeListener('chat:newMessage', handler)
+  },
+
   // Shell
   openExternal: (url: string) => ipcRenderer.invoke('shell:openExternal', url),
   showInFinder: (path: string) => ipcRenderer.invoke('shell:showInFinder', path)

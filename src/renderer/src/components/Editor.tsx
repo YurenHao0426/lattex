@@ -16,8 +16,9 @@ import {
 } from '../extensions/commentHighlights'
 import { addCommentTooltip, setAddCommentCallback } from '../extensions/addCommentTooltip'
 import { otSyncExtension, remoteUpdateAnnotation } from '../extensions/otSyncExtension'
+import { remoteCursorsExtension, setRemoteCursorsEffect, type RemoteCursor } from '../extensions/remoteCursors'
 import { OverleafDocSync } from '../ot/overleafSync'
-import { activeDocSyncs } from '../App'
+import { activeDocSyncs, remoteCursors } from '../App'
 
 const cosmicLatteTheme = EditorView.theme({
   '&': { height: '100%', fontSize: '13.5px', backgroundColor: '#FFF8E7' },
@@ -63,6 +64,8 @@ export default function Editor() {
   const docVersions = useAppStore((s) => s.docVersions)
   const content = activeTab ? fileContents[activeTab] ?? '' : ''
   const docSyncRef = useRef<OverleafDocSync | null>(null)
+
+  const cursorThrottleRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   // Add comment state
   const [newComment, setNewComment] = useState<{ from: number; to: number; text: string } | null>(null)
@@ -163,6 +166,18 @@ export default function Editor() {
         if (found !== store.focusedThreadId) {
           store.setFocusedThreadId(found)
         }
+
+        // Send cursor position to Overleaf (throttled)
+        const docId = pathDocMap[activeTab!]
+        if (docId) {
+          if (cursorThrottleRef.current) clearTimeout(cursorThrottleRef.current)
+          cursorThrottleRef.current = setTimeout(() => {
+            const line = update.state.doc.lineAt(cursorPos)
+            const row = line.number - 1
+            const column = cursorPos - line.from
+            window.api.cursorUpdate(docId, row, column)
+          }, 300)
+        }
       }
     })
 
@@ -207,6 +222,7 @@ export default function Editor() {
         commentHighlights(),
         overleafProjectId ? addCommentTooltip() : [],
         ...otExt,
+        remoteCursorsExtension(),
       ]
     })
 
@@ -253,6 +269,33 @@ export default function Editor() {
       viewRef.current = null
     }
   }, [activeTab])
+
+  // Sync remote cursors to CodeMirror
+  useEffect(() => {
+    if (!viewRef.current || !activeTab) return
+    const docId = pathDocMap[activeTab]
+    if (!docId) return
+
+    const refreshCursors = () => {
+      if (!viewRef.current) return
+      const cursorsForDoc: RemoteCursor[] = []
+      for (const c of remoteCursors.values()) {
+        if (c.docId === docId) {
+          cursorsForDoc.push(c)
+        }
+      }
+      viewRef.current.dispatch({ effects: setRemoteCursorsEffect.of(cursorsForDoc) })
+    }
+
+    // Refresh on event
+    window.addEventListener('remoteCursorsChanged', refreshCursors)
+    // Initial refresh
+    refreshCursors()
+
+    return () => {
+      window.removeEventListener('remoteCursorsChanged', refreshCursors)
+    }
+  }, [activeTab, pathDocMap])
 
   // Sync comment ranges to CodeMirror
   useEffect(() => {

@@ -620,6 +620,17 @@ ipcMain.handle('ot:connect', async (_e, projectId: string) => {
       })
     })
 
+    // Relay collaborator cursor updates to renderer
+    overleafSock.on('serverEvent', (name: string, args: unknown[]) => {
+      if (name === 'clientTracking.clientUpdated') {
+        mainWindow?.webContents.send('cursor:remoteUpdate', args[0])
+      } else if (name === 'clientTracking.clientDisconnected') {
+        mainWindow?.webContents.send('cursor:remoteDisconnected', args[0])
+      } else if (name === 'new-chat-message') {
+        mainWindow?.webContents.send('chat:newMessage', args[0])
+      }
+    })
+
     const projectResult = await overleafSock.connect(projectId, overleafSessionCookie)
     const { files, docPathMap, pathDocMap, fileRefs, rootFolderId } = walkRootFolder(projectResult.project.rootFolder)
 
@@ -743,6 +754,40 @@ ipcMain.handle('ot:sendOp', async (_e, docId: string, ops: unknown[], version: n
 // Renderer → bridge: editor content changed (for disk sync)
 ipcMain.handle('sync:contentChanged', async (_e, docId: string, content: string) => {
   fileSyncBridge?.onEditorContentChanged(docId, content)
+})
+
+// ── Cursor Tracking ────────────────────────────────────────────
+
+ipcMain.handle('cursor:update', async (_e, docId: string, row: number, column: number) => {
+  overleafSock?.updateCursorPosition(docId, row, column)
+})
+
+ipcMain.handle('cursor:getConnectedUsers', async () => {
+  if (!overleafSock) return []
+  try {
+    return await overleafSock.getConnectedUsers()
+  } catch (e) {
+    console.log('[cursor:getConnectedUsers] error:', e)
+    return []
+  }
+})
+
+// ── Chat ───────────────────────────────────────────────────────
+
+ipcMain.handle('chat:getMessages', async (_e, projectId: string, limit?: number) => {
+  if (!overleafSessionCookie) return { success: false, messages: [] }
+  const result = await overleafFetch(`/project/${projectId}/messages?limit=${limit || 50}`)
+  if (!result.ok) return { success: false, messages: [] }
+  return { success: true, messages: result.data }
+})
+
+ipcMain.handle('chat:sendMessage', async (_e, projectId: string, content: string) => {
+  if (!overleafSessionCookie) return { success: false }
+  const result = await overleafFetch(`/project/${projectId}/messages`, {
+    method: 'POST',
+    body: JSON.stringify({ content })
+  })
+  return { success: result.ok }
 })
 
 ipcMain.handle('overleaf:listProjects', async () => {

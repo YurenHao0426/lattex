@@ -1,7 +1,7 @@
 import { useAppStore } from '../stores/appStore'
 
 export default function StatusBar() {
-  const { statusMessage, activeTab, compiling, connectionState } = useAppStore()
+  const { statusMessage, activeTab, compiling, connectionState, onlineUsersCount } = useAppStore()
 
   const lineInfo = activeTab ? activeTab.split('/').pop() : ''
 
@@ -24,6 +24,7 @@ export default function StatusBar() {
         <span className="status-connection">
           <span className={`connection-dot ${connectionDot}`} />
           {connectionLabel}
+          {onlineUsersCount > 0 && ` (${onlineUsersCount + 1})`}
         </span>
         {lineInfo && <span className="status-file">{lineInfo}</span>}
         <span className="status-encoding">UTF-8</span>

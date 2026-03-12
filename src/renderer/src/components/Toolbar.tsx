@@ -8,7 +8,8 @@ interface ToolbarProps {
 export default function Toolbar({ onCompile, onBack }: ToolbarProps) {
   const {
     compiling, toggleTerminal, toggleFileTree, showTerminal, showFileTree,
-    showReviewPanel, toggleReviewPanel, connectionState, overleafProject
+    showReviewPanel, toggleReviewPanel, showChat, toggleChat,
+    connectionState, overleafProject, onlineUsersCount
   } = useAppStore()
 
   const projectName = overleafProject?.name || 'Project'
@@ -43,6 +44,14 @@ export default function Toolbar({ onCompile, onBack }: ToolbarProps) {
         </button>
       </div>
       <div className="toolbar-right">
+        {onlineUsersCount > 0 && (
+          <span className="toolbar-users" title={`${onlineUsersCount} user${onlineUsersCount > 1 ? 's' : ''} online`}>
+            {onlineUsersCount}
+          </span>
+        )}
+        <button className={`toolbar-btn ${showChat ? 'active' : ''}`} onClick={toggleChat} title="Toggle chat">
+          Chat
+        </button>
         <button className={`toolbar-btn ${showReviewPanel ? 'active' : ''}`} onClick={toggleReviewPanel} title="Toggle review panel">
           Review
         </button>

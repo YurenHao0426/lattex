@@ -92,6 +92,10 @@ export class OverleafSocket extends EventEmitter {
     return this._projectData
   }
 
+  get publicId(): string | null {
+    return this._projectData?.publicId || null
+  }
+
   private setState(s: ConnectionState) {
     this._state = s
     this.emit('connectionState', s)
@@ -268,6 +272,20 @@ export class OverleafSocket extends EventEmitter {
   async applyOtUpdate(docId: string, ops: unknown[], version: number, hash: string): Promise<void> {
     // Fire-and-forget: server responds with otUpdateApplied or otUpdateError event
     this.ws?.send(encodeEvent('applyOtUpdate', [docId, { doc: docId, op: ops, v: version, hash, lastV: version }]))
+  }
+
+  /** Get list of connected users with their cursor positions */
+  async getConnectedUsers(): Promise<unknown[]> {
+    const result = await this.emitWithAck('clientTracking.getConnectedUsers', []) as unknown[]
+    // result format: [error, usersArray]
+    const err = result[0]
+    if (err) throw new Error(`getConnectedUsers failed: ${JSON.stringify(err)}`)
+    return (result[1] as unknown[]) || []
+  }
+
+  /** Send our cursor position */
+  updateCursorPosition(docId: string, row: number, column: number): void {
+    this.ws?.send(encodeEvent('clientTracking.updatePosition', [{ row, column, doc_id: docId }]))
   }
 
   disconnect() {

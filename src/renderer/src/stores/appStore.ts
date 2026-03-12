@@ -92,6 +92,14 @@ interface AppState {
   showReviewPanel: boolean
   toggleReviewPanel: () => void
 
+  // Chat panel
+  showChat: boolean
+  toggleChat: () => void
+
+  // Connected users count
+  onlineUsersCount: number
+  setOnlineUsersCount: (n: number) => void
+
   // Comment data
   commentContexts: Record<string, CommentContext>
   setCommentContexts: (c: Record<string, CommentContext>) => void
@@ -191,6 +199,12 @@ export const useAppStore = create<AppState>((set) => ({
   showReviewPanel: false,
   toggleReviewPanel: () => set((s) => ({ showReviewPanel: !s.showReviewPanel })),
 
+  showChat: false,
+  toggleChat: () => set((s) => ({ showChat: !s.showChat })),
+
+  onlineUsersCount: 0,
+  setOnlineUsersCount: (n) => set({ onlineUsersCount: n }),
+
   commentContexts: {},
   setCommentContexts: (c) => set({ commentContexts: c }),
   overleafDocs: {},
@@ -228,6 +242,8 @@ export const useAppStore = create<AppState>((set) => ({
     hoveredThreadId: null,
     focusedThreadId: null,
     pendingGoTo: null,
-    statusMessage: 'Ready'
+    statusMessage: 'Ready',
+    showChat: false,
+    onlineUsersCount: 0
   })
 }))

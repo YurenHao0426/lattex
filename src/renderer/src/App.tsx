@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, Component, type ReactNode } from 'react'
+import { useState, useEffect, useCallback, useRef, Component, type ReactNode } from 'react'
 import { PanelGroup, Panel, PanelResizeHandle } from 'react-resizable-panels'
 import { useAppStore } from './stores/appStore'
 import ModalProvider from './components/ModalProvider'
@@ -9,10 +9,15 @@ import Editor from './components/Editor'
 import PdfViewer from './components/PdfViewer'
 import Terminal from './components/Terminal'
 import ReviewPanel from './components/ReviewPanel'
+import ChatPanel from './components/ChatPanel'
 import StatusBar from './components/StatusBar'
 import type { OverleafDocSync } from './ot/overleafSync'
+import { colorForUser, type RemoteCursor } from './extensions/remoteCursors'
 
 export const activeDocSyncs = new Map<string, OverleafDocSync>()
+
+// Global remote cursor state — shared between App and Editor
+export const remoteCursors = new Map<string, RemoteCursor & { docId: string }>()
 
 class ErrorBoundary extends Component<{ children: ReactNode }, { error: Error | null }> {
   state = { error: null as Error | null }
@@ -39,6 +44,7 @@ export default function App() {
     showTerminal,
     showFileTree,
     showReviewPanel,
+    showChat,
   } = useAppStore()
 
   const [checkingSession, setCheckingSession] = useState(true)
@@ -83,12 +89,65 @@ export default function App() {
       if (sync) sync.replaceContent(data.content)
     })
 
+    // Listen for remote cursor updates
+    const unsubCursorUpdate = window.api.onCursorRemoteUpdate((raw) => {
+      const data = raw as {
+        id: string; user_id: string; name: string; email: string;
+        doc_id: string; row: number; column: number
+      }
+      remoteCursors.set(data.id, {
+        userId: data.id,
+        name: data.name || data.email?.split('@')[0] || 'User',
+        color: colorForUser(data.user_id || data.id),
+        row: data.row,
+        column: data.column,
+        docId: data.doc_id
+      })
+      // Update online users count
+      useAppStore.getState().setOnlineUsersCount(remoteCursors.size)
+      // Notify editor to refresh cursors
+      window.dispatchEvent(new CustomEvent('remoteCursorsChanged'))
+    })
+
+    const unsubCursorDisconnected = window.api.onCursorRemoteDisconnected((clientId) => {
+      remoteCursors.delete(clientId)
+      useAppStore.getState().setOnlineUsersCount(remoteCursors.size)
+      window.dispatchEvent(new CustomEvent('remoteCursorsChanged'))
+    })
+
+    // Fetch initial connected users
+    window.api.cursorGetConnectedUsers().then((users) => {
+      const arr = users as Array<{
+        client_id: string; user_id: string;
+        first_name: string; last_name?: string; email: string;
+        cursorData?: { doc_id: string; row: number; column: number }
+      }>
+      for (const u of arr) {
+        if (u.cursorData) {
+          const name = [u.first_name, u.last_name].filter(Boolean).join(' ') || u.email?.split('@')[0] || 'User'
+          remoteCursors.set(u.client_id, {
+            userId: u.client_id,
+            name,
+            color: colorForUser(u.user_id || u.client_id),
+            row: u.cursorData.row,
+            column: u.cursorData.column,
+            docId: u.cursorData.doc_id
+          })
+        }
+      }
+      useAppStore.getState().setOnlineUsersCount(remoteCursors.size)
+      window.dispatchEvent(new CustomEvent('remoteCursorsChanged'))
+    })
+
     return () => {
       unsubRemoteOp()
       unsubAck()
       unsubState()
       unsubRejoined()
       unsubExternalEdit()
+      unsubCursorUpdate()
+      unsubCursorDisconnected()
+      remoteCursors.clear()
     }
   }, [screen, setStatusMessage])
 
@@ -273,9 +332,10 @@ export default function App() {
               </PanelGroup>
             </Panel>
           </PanelGroup>
-          {showReviewPanel && (
+          {(showReviewPanel || showChat) && (
             <div className="review-sidebar">
-              <ReviewPanel />
+              {showReviewPanel && <ReviewPanel />}
+              {showChat && <ChatPanel />}
             </div>
           )}
         </div>
