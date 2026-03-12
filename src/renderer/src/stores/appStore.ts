@@ -1,11 +1,19 @@
 import { create } from 'zustand'
 
-interface FileNode {
+export interface FileNode {
   name: string
   path: string
   isDir: boolean
   children?: FileNode[]
+  docId?: string
+  fileRefId?: string
+  folderId?: string
 }
+
+export type SocketConnectionState = 'disconnected' | 'connecting' | 'connected' | 'reconnecting'
+
+/** Which screen is currently active */
+export type AppScreen = 'login' | 'projects' | 'editor'
 
 interface OpenTab {
   path: string
@@ -13,10 +21,16 @@ interface OpenTab {
   modified: boolean
 }
 
+export interface CommentContext {
+  file: string
+  text: string
+  pos: number
+}
+
 interface AppState {
-  // Project
-  projectPath: string | null
-  setProjectPath: (p: string | null) => void
+  // Screen
+  screen: AppScreen
+  setScreen: (s: AppScreen) => void
 
   // File tree
   files: FileNode[]
@@ -34,7 +48,7 @@ interface AppState {
   fileContents: Record<string, string>
   setFileContent: (path: string, content: string) => void
 
-  // Main document
+  // Main document (rootDocId)
   mainDocument: string | null
   setMainDocument: (p: string | null) => void
 
@@ -55,24 +69,54 @@ interface AppState {
   showFileTree: boolean
   toggleFileTree: () => void
 
-  // Git/Overleaf
-  isGitRepo: boolean
-  setIsGitRepo: (v: boolean) => void
-  gitStatus: string
-  setGitStatus: (s: string) => void
+  // Overleaf
+  overleafProjectId: string | null
+  setOverleafProjectId: (id: string | null) => void
 
-  // Navigation (from log click → editor)
-  pendingGoTo: { file: string; line: number } | null
-  setPendingGoTo: (g: { file: string; line: number } | null) => void
+  // Socket connection
+  connectionState: SocketConnectionState
+  setConnectionState: (s: SocketConnectionState) => void
+  docPathMap: Record<string, string>   // docId → relativePath
+  pathDocMap: Record<string, string>   // relativePath → docId
+  setDocMaps: (docPath: Record<string, string>, pathDoc: Record<string, string>) => void
+  docVersions: Record<string, number>  // docId → version
+  setDocVersion: (docId: string, version: number) => void
+  overleafProject: { name: string; rootDocId: string } | null
+  setOverleafProject: (p: { name: string; rootDocId: string } | null) => void
+  fileRefs: Array<{ id: string; path: string }>
+  setFileRefs: (refs: Array<{ id: string; path: string }>) => void
+  rootFolderId: string
+  setRootFolderId: (id: string) => void
+
+  // Review panel
+  showReviewPanel: boolean
+  toggleReviewPanel: () => void
+
+  // Comment data
+  commentContexts: Record<string, CommentContext>
+  setCommentContexts: (c: Record<string, CommentContext>) => void
+  overleafDocs: Record<string, string>
+  setOverleafDocs: (d: Record<string, string>) => void
+  hoveredThreadId: string | null
+  setHoveredThreadId: (id: string | null) => void
+  focusedThreadId: string | null
+  setFocusedThreadId: (id: string | null) => void
+
+  // Navigation
+  pendingGoTo: { file: string; line?: number; pos?: number; highlight?: string } | null
+  setPendingGoTo: (g: { file: string; line?: number; pos?: number; highlight?: string } | null) => void
 
   // Status
   statusMessage: string
   setStatusMessage: (m: string) => void
+
+  // Reset editor state (when going back to project list)
+  resetEditorState: () => void
 }
 
 export const useAppStore = create<AppState>((set) => ({
-  projectPath: null,
-  setProjectPath: (p) => set({ projectPath: p }),
+  screen: 'login',
+  setScreen: (s) => set({ screen: s }),
 
   files: [],
   setFiles: (f) => set({ files: f }),
@@ -126,14 +170,64 @@ export const useAppStore = create<AppState>((set) => ({
   showFileTree: true,
   toggleFileTree: () => set((s) => ({ showFileTree: !s.showFileTree })),
 
-  isGitRepo: false,
-  setIsGitRepo: (v) => set({ isGitRepo: v }),
-  gitStatus: '',
-  setGitStatus: (s) => set({ gitStatus: s }),
+  overleafProjectId: null,
+  setOverleafProjectId: (id) => set({ overleafProjectId: id }),
+
+  connectionState: 'disconnected',
+  setConnectionState: (s) => set({ connectionState: s }),
+  docPathMap: {},
+  pathDocMap: {},
+  setDocMaps: (docPath, pathDoc) => set({ docPathMap: docPath, pathDocMap: pathDoc }),
+  docVersions: {},
+  setDocVersion: (docId, version) =>
+    set((s) => ({ docVersions: { ...s.docVersions, [docId]: version } })),
+  overleafProject: null,
+  setOverleafProject: (p) => set({ overleafProject: p }),
+  fileRefs: [],
+  setFileRefs: (refs) => set({ fileRefs: refs }),
+  rootFolderId: '',
+  setRootFolderId: (id) => set({ rootFolderId: id }),
+
+  showReviewPanel: false,
+  toggleReviewPanel: () => set((s) => ({ showReviewPanel: !s.showReviewPanel })),
+
+  commentContexts: {},
+  setCommentContexts: (c) => set({ commentContexts: c }),
+  overleafDocs: {},
+  setOverleafDocs: (d) => set({ overleafDocs: d }),
+  hoveredThreadId: null,
+  setHoveredThreadId: (id) => set({ hoveredThreadId: id }),
+  focusedThreadId: null,
+  setFocusedThreadId: (id) => set({ focusedThreadId: id }),
 
   pendingGoTo: null,
   setPendingGoTo: (g) => set({ pendingGoTo: g }),
 
   statusMessage: 'Ready',
-  setStatusMessage: (m) => set({ statusMessage: m })
+  setStatusMessage: (m) => set({ statusMessage: m }),
+
+  resetEditorState: () => set({
+    files: [],
+    openTabs: [],
+    activeTab: null,
+    fileContents: {},
+    mainDocument: null,
+    pdfPath: null,
+    compileLog: '',
+    compiling: false,
+    overleafProjectId: null,
+    connectionState: 'disconnected',
+    docPathMap: {},
+    pathDocMap: {},
+    docVersions: {},
+    overleafProject: null,
+    fileRefs: [],
+    rootFolderId: '',
+    commentContexts: {},
+    overleafDocs: {},
+    hoveredThreadId: null,
+    focusedThreadId: null,
+    pendingGoTo: null,
+    statusMessage: 'Ready'
+  })
 }))

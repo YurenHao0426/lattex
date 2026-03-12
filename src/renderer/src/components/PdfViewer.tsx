@@ -147,32 +147,26 @@ export default function PdfViewer() {
     : logEntries.filter((e) => e.level === logFilter)
 
   // Navigate to file:line in editor
-  const handleEntryClick = async (entry: LogEntry) => {
+  const handleEntryClick = (entry: LogEntry) => {
     if (!entry.line) return
-    const { projectPath, mainDocument } = useAppStore.getState()
-    if (!projectPath) return
+    const store = useAppStore.getState()
 
-    // If no file specified, use the main document
-    const entryFile = entry.file || (mainDocument ? mainDocument.split('/').pop()! : null)
+    // If no file specified, try to use the main document's path
+    const entryFile = entry.file || null
     if (!entryFile) return
 
-    // Try resolving the file path
-    const candidates = [
-      entryFile.startsWith('/') ? entryFile : `${projectPath}/${entryFile}`,
-    ]
-    if (mainDocument) {
-      const dir = mainDocument.substring(0, mainDocument.lastIndexOf('/'))
-      candidates.push(`${dir}/${entryFile}`)
-    }
+    // In socket mode, files are keyed by relative path in fileContents
+    // Try to find a matching open file
+    const candidates = [entryFile]
+    // Also try without leading ./ or path prefix
+    if (entryFile.startsWith('./')) candidates.push(entryFile.slice(2))
 
-    for (const fullPath of candidates) {
-      try {
-        const content = await window.api.readFile(fullPath)
-        useAppStore.getState().setFileContent(fullPath, content)
-        useAppStore.getState().openFile(fullPath, fullPath.split('/').pop() || entryFile)
-        useAppStore.getState().setPendingGoTo({ file: fullPath, line: entry.line! })
+    for (const path of candidates) {
+      if (store.fileContents[path]) {
+        store.openFile(path, path.split('/').pop() || path)
+        store.setPendingGoTo({ file: path, line: entry.line! })
         return
-      } catch { /* try next */ }
+      }
     }
   }
 

@@ -2,70 +2,50 @@ import { useAppStore } from '../stores/appStore'
 
 interface ToolbarProps {
   onCompile: () => void
-  onSave: () => void
-  onOpenProject: () => void
+  onBack: () => void
 }
 
-export default function Toolbar({ onCompile, onSave, onOpenProject }: ToolbarProps) {
-  const { projectPath, compiling, toggleTerminal, toggleFileTree, showTerminal, showFileTree, isGitRepo, mainDocument } = useAppStore()
-  const projectName = projectPath?.split('/').pop() ?? 'ClaudeTeX'
+export default function Toolbar({ onCompile, onBack }: ToolbarProps) {
+  const {
+    compiling, toggleTerminal, toggleFileTree, showTerminal, showFileTree,
+    showReviewPanel, toggleReviewPanel, connectionState, overleafProject
+  } = useAppStore()
 
-  const handlePull = async () => {
-    if (!projectPath) return
-    useAppStore.getState().setStatusMessage('Pulling from Overleaf...')
-    const result = await window.api.gitPull(projectPath)
-    useAppStore.getState().setStatusMessage(result.success ? 'Pull complete' : 'Pull failed')
-  }
+  const projectName = overleafProject?.name || 'Project'
 
-  const handlePush = async () => {
-    if (!projectPath) return
-    useAppStore.getState().setStatusMessage('Pushing to Overleaf...')
-    const result = await window.api.gitPush(projectPath)
-    useAppStore.getState().setStatusMessage(result.success ? 'Push complete' : 'Push failed')
-  }
+  const connectionDot = connectionState === 'connected' ? 'connection-dot-green'
+    : connectionState === 'connecting' || connectionState === 'reconnecting' ? 'connection-dot-yellow'
+    : 'connection-dot-red'
 
   return (
     <div className="toolbar">
       <div className="toolbar-left">
         <div className="drag-region" />
-        <button className="toolbar-btn" onClick={toggleFileTree} title="Toggle file tree (Cmd+\\)">
+        <button className="toolbar-btn" onClick={onBack} title="Back to projects">
+          &#8592;
+        </button>
+        <button className="toolbar-btn" onClick={toggleFileTree} title="Toggle file tree">
           {showFileTree ? '◧' : '☰'}
         </button>
-        <span className="project-name">{projectName}</span>
+        <span className="project-name">
+          <span className={`connection-dot ${connectionDot}`} title={connectionState} />
+          {projectName}
+        </span>
       </div>
       <div className="toolbar-center">
-        <button className="toolbar-btn" onClick={onOpenProject} title="Open project">
-          Open
-        </button>
-        <button className="toolbar-btn" onClick={onSave} title="Save (Cmd+S)">
-          Save
-        </button>
         <button
           className={`toolbar-btn toolbar-btn-primary ${compiling ? 'compiling' : ''}`}
           onClick={onCompile}
           disabled={compiling}
-          title={`Compile (Cmd+B)${mainDocument ? ' — ' + mainDocument.split('/').pop() : ''}`}
+          title="Compile (Cmd+B)"
         >
           {compiling ? 'Compiling...' : 'Compile'}
         </button>
-        {mainDocument && (
-          <span className="toolbar-main-doc" title={mainDocument}>
-            {mainDocument.split('/').pop()}
-          </span>
-        )}
-        {isGitRepo && (
-          <>
-            <div className="toolbar-separator" />
-            <button className="toolbar-btn" onClick={handlePull} title="Pull from Overleaf">
-              Pull
-            </button>
-            <button className="toolbar-btn" onClick={handlePush} title="Push to Overleaf">
-              Push
-            </button>
-          </>
-        )}
       </div>
       <div className="toolbar-right">
+        <button className={`toolbar-btn ${showReviewPanel ? 'active' : ''}`} onClick={toggleReviewPanel} title="Toggle review panel">
+          Review
+        </button>
         <button className="toolbar-btn" onClick={toggleTerminal} title="Toggle terminal (Cmd+`)">
           {showTerminal ? 'Hide Terminal' : 'Terminal'}
         </button>

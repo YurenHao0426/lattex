@@ -8,11 +8,10 @@ export default function Terminal() {
   const termRef = useRef<HTMLDivElement>(null)
   const xtermRef = useRef<XTerm | null>(null)
   const fitAddonRef = useRef<FitAddon | null>(null)
-  const { projectPath } = useAppStore()
   const [mode, setMode] = useState<'terminal' | 'claude'>('terminal')
 
   useEffect(() => {
-    if (!termRef.current || !projectPath) return
+    if (!termRef.current) return
 
     const xterm = new XTerm({
       theme: {
@@ -54,7 +53,7 @@ export default function Terminal() {
     fitAddonRef.current = fitAddon
 
     // Spawn shell
-    window.api.ptySpawn(projectPath)
+    window.api.ptySpawn('/tmp')
 
     // Pipe data
     const unsubData = window.api.onPtyData((data) => {
@@ -86,7 +85,7 @@ export default function Terminal() {
       window.api.ptyKill()
       xterm.dispose()
     }
-  }, [projectPath])
+  }, [])
 
   const launchClaude = () => {
     if (!xtermRef.current) return

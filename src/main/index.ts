@@ -1,14 +1,17 @@
 import { app, BrowserWindow, ipcMain, dialog, shell, net } from 'electron'
-import { join, basename, extname, dirname } from 'path'
-import { readdir, readFile, writeFile, stat, mkdir, rename, unlink, rm } from 'fs/promises'
-import { spawn, type ChildProcess } from 'child_process'
-import { watch } from 'chokidar'
+import { join, basename } from 'path'
+import { readFile, writeFile } from 'fs/promises'
+import { spawn } from 'child_process'
 import * as pty from 'node-pty'
+import { OverleafSocket, type RootFolder, type SubFolder, type JoinDocResult } from './overleafSocket'
+import { CompilationManager } from './compilationManager'
+import { FileSyncBridge } from './fileSyncBridge'
 
 let mainWindow: BrowserWindow | null = null
 let ptyInstance: pty.IPty | null = null
-let fileWatcher: ReturnType<typeof watch> | null = null
-let compileProcess: ChildProcess | null = null
+let overleafSock: OverleafSocket | null = null
+let compilationManager: CompilationManager | null = null
+let fileSyncBridge: FileSyncBridge | null = null
 
 function createWindow(): void {
   mainWindow = new BrowserWindow({
@@ -32,156 +35,13 @@ function createWindow(): void {
   }
 }
 
-// ── File System IPC ──────────────────────────────────────────────
-
-interface FileNode {
-  name: string
-  path: string
-  isDir: boolean
-  children?: FileNode[]
-}
-
-async function readDirRecursive(dirPath: string, depth = 0): Promise<FileNode[]> {
-  if (depth > 5) return []
-  const entries = await readdir(dirPath, { withFileTypes: true })
-  const nodes: FileNode[] = []
-
-  for (const entry of entries) {
-    if (entry.name.startsWith('.') || entry.name === 'node_modules' || entry.name === 'out') continue
-
-    const fullPath = join(dirPath, entry.name)
-    if (entry.isDirectory()) {
-      const children = await readDirRecursive(fullPath, depth + 1)
-      nodes.push({ name: entry.name, path: fullPath, isDir: true, children })
-    } else {
-      const ext = extname(entry.name).toLowerCase()
-      if (['.tex', '.bib', '.cls', '.sty', '.bst', '.txt', '.md', '.log', '.aux', '.pdf', '.png', '.jpg', '.jpeg', '.svg'].includes(ext)) {
-        nodes.push({ name: entry.name, path: fullPath, isDir: false })
-      }
-    }
-  }
-
-  return nodes.sort((a, b) => {
-    if (a.isDir && !b.isDir) return -1
-    if (!a.isDir && b.isDir) return 1
-    return a.name.localeCompare(b.name)
-  })
-}
-
-ipcMain.handle('dialog:openProject', async () => {
-  const result = await dialog.showOpenDialog(mainWindow!, {
-    properties: ['openDirectory'],
-    title: 'Open LaTeX Project'
-  })
-  if (result.canceled) return null
-  return result.filePaths[0]
-})
-
-ipcMain.handle('dialog:selectSaveDir', async () => {
-  const result = await dialog.showOpenDialog(mainWindow!, {
-    properties: ['openDirectory', 'createDirectory'],
-    title: 'Choose where to clone the project'
-  })
-  if (result.canceled) return null
-  return result.filePaths[0]
-})
-
-ipcMain.handle('fs:readDir', async (_e, dirPath: string) => {
-  return readDirRecursive(dirPath)
-})
-
 ipcMain.handle('fs:readFile', async (_e, filePath: string) => {
   return readFile(filePath, 'utf-8')
-})
-
-// Find the main .tex file (contains \documentclass) in a project
-ipcMain.handle('fs:findMainTex', async (_e, dirPath: string) => {
-  async function search(dir: string, depth: number): Promise<string | null> {
-    if (depth > 3) return null
-    const entries = await readdir(dir, { withFileTypes: true })
-    const texFiles: string[] = []
-    const dirs: string[] = []
-    for (const entry of entries) {
-      if (entry.name.startsWith('.') || entry.name === 'node_modules' || entry.name === 'out') continue
-      const full = join(dir, entry.name)
-      if (entry.isDirectory()) dirs.push(full)
-      else if (entry.name.endsWith('.tex')) texFiles.push(full)
-    }
-    for (const f of texFiles) {
-      try {
-        const content = await readFile(f, 'utf-8')
-        if (/\\documentclass/.test(content)) return f
-      } catch { /* skip */ }
-    }
-    for (const d of dirs) {
-      const found = await search(d, depth + 1)
-      if (found) return found
-    }
-    return null
-  }
-  return search(dirPath, 0)
 })
 
 ipcMain.handle('fs:readBinary', async (_e, filePath: string) => {
   const buffer = await readFile(filePath)
   return buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength)
-})
-
-ipcMain.handle('fs:writeFile', async (_e, filePath: string, content: string) => {
-  await writeFile(filePath, content, 'utf-8')
-})
-
-ipcMain.handle('fs:createFile', async (_e, dirPath: string, fileName: string) => {
-  const fullPath = join(dirPath, fileName)
-  await writeFile(fullPath, '', 'utf-8')
-  return fullPath
-})
-
-ipcMain.handle('fs:createDir', async (_e, dirPath: string, dirName: string) => {
-  const fullPath = join(dirPath, dirName)
-  await mkdir(fullPath, { recursive: true })
-  return fullPath
-})
-
-ipcMain.handle('fs:rename', async (_e, oldPath: string, newPath: string) => {
-  await rename(oldPath, newPath)
-})
-
-ipcMain.handle('fs:delete', async (_e, filePath: string) => {
-  const s = await stat(filePath)
-  if (s.isDirectory()) {
-    await rm(filePath, { recursive: true })
-  } else {
-    await unlink(filePath)
-  }
-})
-
-ipcMain.handle('fs:stat', async (_e, filePath: string) => {
-  const s = await stat(filePath)
-  return { isDir: s.isDirectory(), size: s.size, mtime: s.mtimeMs }
-})
-
-// ── File Watcher ─────────────────────────────────────────────────
-
-ipcMain.handle('watcher:start', async (_e, dirPath: string) => {
-  if (fileWatcher) {
-    await fileWatcher.close()
-  }
-  fileWatcher = watch(dirPath, {
-    ignored: /(^|[/\\])(\.|node_modules|out|\.aux|\.log|\.fls|\.fdb_latexmk|\.synctex)/,
-    persistent: true,
-    depth: 5
-  })
-  fileWatcher.on('all', (event, path) => {
-    mainWindow?.webContents.send('watcher:change', { event, path })
-  })
-})
-
-ipcMain.handle('watcher:stop', async () => {
-  if (fileWatcher) {
-    await fileWatcher.close()
-    fileWatcher = null
-  }
 })
 
 // ── LaTeX Compilation ────────────────────────────────────────────
@@ -194,113 +54,6 @@ for (const p of texPaths) {
     process.env.PATH = `${p}:${process.env.PATH}`
   }
 }
-
-// Parse missing packages from compile log
-function parseMissingPackages(log: string): string[] {
-  const missing = new Set<string>()
-  // Match "File `xxx.sty' not found"
-  const styRegex = /File `([^']+\.sty)' not found/g
-  let m: RegExpExecArray | null
-  while ((m = styRegex.exec(log)) !== null) {
-    missing.add(m[1].replace(/\.sty$/, ''))
-  }
-  // Match "Metric (TFM) file not found" for fonts
-  const tfmRegex = /Font [^=]+=(\w+) .* not loadable: Metric/g
-  while ((m = tfmRegex.exec(log)) !== null) {
-    missing.add(m[1])
-  }
-  return [...missing]
-}
-
-// Find which tlmgr packages provide the missing files
-async function findTlmgrPackages(names: string[]): Promise<string[]> {
-  const packages = new Set<string>()
-  for (const name of names) {
-    const result = await new Promise<string>((resolve) => {
-      let out = ''
-      const proc = spawn('tlmgr', ['search', '--file', `${name}.sty`], { env: process.env })
-      proc.stdout?.on('data', (d) => { out += d.toString() })
-      proc.stderr?.on('data', (d) => { out += d.toString() })
-      proc.on('close', () => resolve(out))
-      proc.on('error', () => resolve(''))
-    })
-    // tlmgr search output: "package_name:\n    texmf-dist/..."
-    const pkgMatch = result.match(/^(\S+):$/m)
-    if (pkgMatch) {
-      packages.add(pkgMatch[1])
-    } else {
-      // Fallback: use the name itself as package name
-      packages.add(name)
-    }
-  }
-  return [...packages]
-}
-
-ipcMain.handle('latex:compile', async (_e, filePath: string) => {
-  if (compileProcess) {
-    compileProcess.kill()
-  }
-
-  const dir = dirname(filePath)
-  const file = basename(filePath)
-
-  return new Promise<{ success: boolean; log: string; missingPackages?: string[] }>((resolve) => {
-    let log = ''
-    compileProcess = spawn('latexmk', ['-pdf', '-f', '-g', '-bibtex', '-synctex=1', '-interaction=nonstopmode', '-file-line-error', file], {
-      cwd: dir,
-      env: process.env
-    })
-
-    compileProcess.stdout?.on('data', (data) => {
-      log += data.toString()
-      mainWindow?.webContents.send('latex:log', data.toString())
-    })
-    compileProcess.stderr?.on('data', (data) => {
-      log += data.toString()
-      mainWindow?.webContents.send('latex:log', data.toString())
-    })
-    compileProcess.on('close', async (code) => {
-      compileProcess = null
-      if (code !== 0) {
-        const missing = parseMissingPackages(log)
-        if (missing.length > 0) {
-          const packages = await findTlmgrPackages(missing)
-          resolve({ success: false, log, missingPackages: packages })
-          return
-        }
-      }
-      resolve({ success: code === 0, log })
-    })
-    compileProcess.on('error', (err) => {
-      compileProcess = null
-      resolve({ success: false, log: err.message })
-    })
-  })
-})
-
-// Install TeX packages via tlmgr (runs in PTY so sudo can prompt for password)
-ipcMain.handle('latex:installPackages', async (_e, packages: string[]) => {
-  if (!packages.length) return { success: false, message: 'No packages specified' }
-
-  // Try without sudo first
-  const tryDirect = await new Promise<{ success: boolean; message: string }>((resolve) => {
-    let out = ''
-    const proc = spawn('tlmgr', ['install', ...packages], { env: process.env })
-    proc.stdout?.on('data', (d) => { out += d.toString() })
-    proc.stderr?.on('data', (d) => { out += d.toString() })
-    proc.on('close', (code) => resolve({ success: code === 0, message: out }))
-    proc.on('error', (err) => resolve({ success: false, message: err.message }))
-  })
-
-  if (tryDirect.success) return tryDirect
-
-  // Need sudo — run in PTY terminal so user can enter password
-  return { success: false, message: 'need_sudo', packages }
-})
-
-ipcMain.handle('latex:getPdfPath', async (_e, texPath: string) => {
-  return texPath.replace(/\.tex$/, '.pdf')
-})
 
 // SyncTeX: PDF position → source file:line (inverse search)
 ipcMain.handle('synctex:editFromPdf', async (_e, pdfPath: string, page: number, x: number, y: number) => {
@@ -319,33 +72,6 @@ ipcMain.handle('synctex:editFromPdf', async (_e, pdfPath: string, page: number, 
         resolve({ file: fileMatch[1].trim(), line: parseInt(lineMatch[1]) })
       } else {
         console.log('[synctex] no result:', out.slice(0, 200))
-        resolve(null)
-      }
-    })
-    proc.on('error', () => resolve(null))
-  })
-})
-
-// SyncTeX: source file:line → PDF page + position (forward search)
-ipcMain.handle('synctex:viewFromSource', async (_e, texPath: string, line: number, pdfPath: string) => {
-  return new Promise<{ page: number; x: number; y: number } | null>((resolve) => {
-    const proc = spawn('synctex', ['view', '-i', `${line}:0:${texPath}`, '-o', pdfPath], {
-      env: process.env
-    })
-    let out = ''
-    proc.stdout?.on('data', (d) => { out += d.toString() })
-    proc.stderr?.on('data', (d) => { out += d.toString() })
-    proc.on('close', () => {
-      const pageMatch = out.match(/Page:(\d+)/)
-      const xMatch = out.match(/x:([0-9.]+)/)
-      const yMatch = out.match(/y:([0-9.]+)/)
-      if (pageMatch) {
-        resolve({
-          page: parseInt(pageMatch[1]),
-          x: xMatch ? parseFloat(xMatch[1]) : 0,
-          y: yMatch ? parseFloat(yMatch[1]) : 0
-        })
-      } else {
         resolve(null)
       }
     })
@@ -393,161 +119,844 @@ ipcMain.handle('pty:kill', async () => {
   ptyInstance = null
 })
 
-// ── Overleaf / Git Sync ──────────────────────────────────────────
+// ── Overleaf Web Session (for comments) ─────────────────────────
 
-// Helper: run git with explicit credentials via a temp credential helper script
-function gitWithCreds(args: string[], email: string, password: string, cwd?: string): Promise<{ success: boolean; message: string }> {
+let overleafSessionCookie = ''
+let overleafCsrfToken = ''
+
+// Persist cookie to disk
+const cookiePath = join(app.getPath('userData'), 'overleaf-session.json')
+
+async function saveOverleafSession(): Promise<void> {
+  try {
+    await writeFile(cookiePath, JSON.stringify({ cookie: overleafSessionCookie, csrf: overleafCsrfToken }))
+  } catch { /* ignore */ }
+}
+
+let sessionLoadPromise: Promise<void> | null = null
+
+async function loadOverleafSession(): Promise<void> {
+  try {
+    const raw = await readFile(cookiePath, 'utf-8')
+    const data = JSON.parse(raw)
+    if (data.cookie) {
+      overleafSessionCookie = data.cookie
+      overleafCsrfToken = data.csrf || ''
+      console.log('[overleaf] loaded saved session, verifying...')
+      // Verify it's still valid
+      const result = await overleafFetch('/user/projects')
+      if (!result.ok) {
+        console.log('[overleaf] saved session expired (status:', result.status, ')')
+        overleafSessionCookie = ''
+        overleafCsrfToken = ''
+      } else {
+        console.log('[overleaf] saved session is valid')
+      }
+    }
+  } catch { /* no saved session */ }
+}
+
+// Helper: make authenticated request to Overleaf web API
+async function overleafFetch(path: string, options: { method?: string; body?: string; raw?: boolean; cookie?: string } = {}): Promise<{ ok: boolean; status: number; data: unknown; setCookies: string[] }> {
   return new Promise((resolve) => {
-    // Use inline credential helper that echoes stored creds
-    const helper = `!f() { echo "username=${email}"; echo "password=${password}"; }; f`
-    const fullArgs = ['-c', `credential.helper=${helper}`, ...args]
-    console.log('[git]', args[0], args.slice(1).join(' ').replace(password, '***'))
-    const proc = spawn('git', fullArgs, {
-      cwd,
-      env: { ...process.env, GIT_TERMINAL_PROMPT: '0' }
+    const url = `https://www.overleaf.com${path}`
+    const request = net.request({ url, method: options.method || 'GET' })
+    request.setHeader('Cookie', options.cookie || overleafSessionCookie)
+    request.setHeader('User-Agent', 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.6723.191 Safari/537.36')
+    if (!options.raw) {
+      request.setHeader('Accept', 'application/json')
+    }
+    if (options.body) {
+      request.setHeader('Content-Type', options.raw ? 'text/plain; charset=UTF-8' : 'application/json')
+    }
+    if (overleafCsrfToken && options.method && options.method !== 'GET') {
+      request.setHeader('x-csrf-token', overleafCsrfToken)
+    }
+
+    let body = ''
+    request.on('response', (response) => {
+      const sc = response.headers['set-cookie']
+      const setCookies = Array.isArray(sc) ? sc : sc ? [sc] : []
+      response.on('data', (chunk) => { body += chunk.toString() })
+      response.on('end', () => {
+        let data: unknown = body
+        if (!options.raw) {
+          try { data = JSON.parse(body) } catch { /* not json */ }
+        }
+        resolve({ ok: response.statusCode >= 200 && response.statusCode < 300, status: response.statusCode, data, setCookies })
+      })
     })
-    let output = ''
-    proc.stdout?.on('data', (d) => { output += d.toString() })
-    proc.stderr?.on('data', (d) => { output += d.toString() })
-    proc.on('close', (code) => {
-      console.log('[git] exit code:', code, 'output:', output.slice(0, 300))
-      resolve({ success: code === 0, message: output })
+    request.on('error', (err) => {
+      resolve({ ok: false, status: 0, data: err.message, setCookies: [] })
     })
-    proc.on('error', (err) => {
-      console.log('[git] error:', err.message)
-      resolve({ success: false, message: err.message })
-    })
+
+    if (options.body) request.write(options.body)
+    request.end()
   })
 }
 
-// Helper: run git with osxkeychain (for after credentials are stored)
-function gitSpawn(args: string[], cwd?: string): Promise<{ success: boolean; message: string }> {
-  return new Promise((resolve) => {
-    const fullArgs = ['-c', 'credential.helper=osxkeychain', ...args]
-    const proc = spawn('git', fullArgs, {
-      cwd,
-      env: { ...process.env, GIT_TERMINAL_PROMPT: '0' }
+// Login via webview — opens Overleaf login page, captures session cookie
+ipcMain.handle('overleaf:webLogin', async () => {
+  return new Promise<{ success: boolean }>((resolve) => {
+    const loginWindow = new BrowserWindow({
+      width: 900,
+      height: 750,
+      parent: mainWindow!,
+      modal: true,
+      webPreferences: { nodeIntegration: false, contextIsolation: true }
     })
-    let output = ''
-    proc.stdout?.on('data', (d) => { output += d.toString() })
-    proc.stderr?.on('data', (d) => { output += d.toString() })
-    proc.on('close', (code) => {
-      resolve({ success: code === 0, message: output })
-    })
-    proc.on('error', (err) => {
-      resolve({ success: false, message: err.message })
+
+    loginWindow.loadURL('https://www.overleaf.com/login')
+
+    // Inject a floating back button when navigated away from overleaf.com
+    const injectBackButton = () => {
+      loginWindow.webContents.executeJavaScript(`
+        if (!document.getElementById('claudetex-back-btn')) {
+          const btn = document.createElement('div');
+          btn.id = 'claudetex-back-btn';
+          btn.innerHTML = '← Back';
+          btn.style.cssText = 'position:fixed;top:8px;left:8px;z-index:999999;padding:6px 14px;' +
+            'background:#333;color:#fff;border-radius:6px;cursor:pointer;font:13px -apple-system,sans-serif;' +
+            'box-shadow:0 2px 8px rgba(0,0,0,.3);user-select:none;-webkit-app-region:no-drag;';
+          btn.addEventListener('click', () => history.back());
+          btn.addEventListener('mouseenter', () => btn.style.background = '#555');
+          btn.addEventListener('mouseleave', () => btn.style.background = '#333');
+          document.body.appendChild(btn);
+        }
+      `).catch(() => {})
+    }
+
+    loginWindow.webContents.on('did-finish-load', injectBackButton)
+    loginWindow.webContents.on('did-navigate-in-page', injectBackButton)
+
+    // Verify cookie by calling Overleaf API — only succeed if we get 200
+    const verifyAndCapture = async (): Promise<boolean> => {
+      const cookies = await loginWindow.webContents.session.cookies.get({ domain: '.overleaf.com' })
+      if (!cookies.find((c) => c.name === 'overleaf_session2')) return false
+
+      const testCookie = cookies.map((c) => `${c.name}=${c.value}`).join('; ')
+      // Test if this cookie is actually authenticated
+      const ok = await new Promise<boolean>((res) => {
+        const req = net.request({ url: 'https://www.overleaf.com/user/projects', method: 'GET' })
+        req.setHeader('Cookie', testCookie)
+        req.setHeader('Accept', 'application/json')
+        req.on('response', (resp) => {
+          resp.on('data', () => {})
+          resp.on('end', () => res(resp.statusCode === 200))
+        })
+        req.on('error', () => res(false))
+        req.end()
+      })
+
+      if (!ok) return false
+
+      overleafSessionCookie = testCookie
+      // Get CSRF from meta tag if we're on an Overleaf page
+      try {
+        const csrf = await loginWindow.webContents.executeJavaScript(
+          `document.querySelector('meta[name="ol-csrfToken"]')?.content || ''`
+        )
+        if (csrf) overleafCsrfToken = csrf
+      } catch { /* ignore */ }
+
+      // If no CSRF from page, fetch from /project page
+      if (!overleafCsrfToken) {
+        await new Promise<void>((res) => {
+          const req = net.request({ url: 'https://www.overleaf.com/project', method: 'GET' })
+          req.setHeader('Cookie', overleafSessionCookie)
+          let body = ''
+          req.on('response', (resp) => {
+            resp.on('data', (chunk) => { body += chunk.toString() })
+            resp.on('end', () => {
+              const m = body.match(/ol-csrfToken[^>]*content="([^"]+)"/)
+              if (m) overleafCsrfToken = m[1]
+              res()
+            })
+          })
+          req.on('error', () => res())
+          req.end()
+        })
+      }
+
+      return true
+    }
+
+    let resolved = false
+    const tryCapture = async () => {
+      if (resolved) return
+      const ok = await verifyAndCapture()
+      if (ok && !resolved) {
+        resolved = true
+        saveOverleafSession()
+        loginWindow.close()
+        resolve({ success: true })
+      }
+    }
+
+    loginWindow.webContents.on('did-navigate', () => { setTimeout(tryCapture, 2000) })
+    loginWindow.webContents.on('did-navigate-in-page', () => { setTimeout(tryCapture, 2000) })
+
+    loginWindow.on('closed', () => {
+      if (!overleafSessionCookie) resolve({ success: false })
     })
   })
-}
-
-// Store credentials in macOS Keychain (no verification — that happens in overleaf:cloneWithAuth)
-function storeCredentials(email: string, password: string): Promise<boolean> {
-  return new Promise((resolve) => {
-    // Erase old first
-    const erase = spawn('git', ['credential-osxkeychain', 'erase'])
-    erase.stdin?.write(`protocol=https\nhost=git.overleaf.com\n\n`)
-    erase.stdin?.end()
-    erase.on('close', () => {
-      const store = spawn('git', ['credential-osxkeychain', 'store'])
-      store.stdin?.write(`protocol=https\nhost=git.overleaf.com\nusername=${email}\npassword=${password}\n\n`)
-      store.stdin?.end()
-      store.on('close', (code) => resolve(code === 0))
-    })
-  })
-}
-
-// Verify credentials + project access using git ls-remote, then clone
-// Overleaf git auth: username is always literal "git", password is the token
-ipcMain.handle('overleaf:cloneWithAuth', async (_e, projectId: string, dest: string, token: string, remember: boolean) => {
-  const repoUrl = `https://git.overleaf.com/${projectId}`
-  console.log('[overleaf:cloneWithAuth] Verifying access to:', projectId)
-
-  // Step 1: ls-remote to verify both auth and project access
-  // Username must be "git" (not email), password is the olp_ token
-  const verify = await gitWithCreds(['ls-remote', '--heads', repoUrl], 'git', token)
-
-  if (!verify.success) {
-    const msg = verify.message
-    console.log('[overleaf:cloneWithAuth] ls-remote failed:', msg)
-    if (msg.includes('only supports Git authentication tokens') || msg.includes('token')) {
-      return { success: false, message: 'need_token', detail: 'Overleaf requires a Git Authentication Token (not your password).\n\n1. Go to Overleaf → Account Settings\n2. Find "Git Integration"\n3. Generate a token and paste it here.' }
-    }
-    if (msg.includes('Authentication failed') || msg.includes('401') || msg.includes('403') || msg.includes('could not read')) {
-      return { success: false, message: 'auth_failed', detail: 'Authentication failed. Make sure you are using a Git Authentication Token, not your Overleaf password.' }
-    }
-    if (msg.includes('not found') || msg.includes('does not appear to be a git repository')) {
-      return { success: false, message: 'not_found', detail: 'Project not found. Check the URL and ensure you have access.' }
-    }
-    return { success: false, message: 'error', detail: msg }
-  }
-
-  console.log('[overleaf:cloneWithAuth] Auth verified. Storing credentials and cloning...')
-
-  // Step 2: Credentials work — store in keychain if requested
-  if (remember) {
-    await storeCredentials('git', token)
-    console.log('[overleaf:cloneWithAuth] Token saved to Keychain')
-  }
-
-  // Step 3: Clone using keychain credentials
-  const result = await gitSpawn(['clone', repoUrl, dest])
-  if (result.success) {
-    return { success: true, message: 'ok', detail: '' }
-  } else {
-    return { success: false, message: 'clone_failed', detail: result.message }
-  }
 })
 
-// Check if credentials exist in Keychain
-ipcMain.handle('overleaf:check', async () => {
-  return new Promise<{ loggedIn: boolean; email: string }>((resolve) => {
-    const proc = spawn('git', ['credential-osxkeychain', 'get'])
-    let out = ''
-    proc.stdout?.on('data', (d) => { out += d.toString() })
-    proc.stdin?.write(`protocol=https\nhost=git.overleaf.com\n\n`)
-    proc.stdin?.end()
-    proc.on('close', (code) => {
-      if (code === 0 && out.includes('username=')) {
-        const match = out.match(/username=(.+)/)
-        resolve({ loggedIn: true, email: match?.[1]?.trim() ?? '' })
-      } else {
-        resolve({ loggedIn: false, email: '' })
+// Check if web session is active — wait for startup load to finish
+ipcMain.handle('overleaf:hasWebSession', async () => {
+  if (sessionLoadPromise) await sessionLoadPromise
+  return { loggedIn: !!overleafSessionCookie }
+})
+
+// Fetch all comment threads for a project
+ipcMain.handle('overleaf:getThreads', async (_e, projectId: string) => {
+  if (!overleafSessionCookie) return { success: false, message: 'not_logged_in' }
+  const result = await overleafFetch(`/project/${projectId}/threads`)
+  if (!result.ok) return { success: false, message: `HTTP ${result.status}` }
+  return { success: true, threads: result.data }
+})
+
+// Reply to a thread
+ipcMain.handle('overleaf:replyThread', async (_e, projectId: string, threadId: string, content: string) => {
+  if (!overleafSessionCookie) return { success: false }
+  const result = await overleafFetch(`/project/${projectId}/thread/${threadId}/messages`, {
+    method: 'POST',
+    body: JSON.stringify({ content })
+  })
+  return { success: result.ok, data: result.data }
+})
+
+// Resolve a thread
+ipcMain.handle('overleaf:resolveThread', async (_e, projectId: string, threadId: string) => {
+  if (!overleafSessionCookie) return { success: false }
+  const result = await overleafFetch(`/project/${projectId}/thread/${threadId}/resolve`, {
+    method: 'POST',
+    body: '{}'
+  })
+  return { success: result.ok }
+})
+
+// Reopen a thread
+ipcMain.handle('overleaf:reopenThread', async (_e, projectId: string, threadId: string) => {
+  if (!overleafSessionCookie) return { success: false }
+  const result = await overleafFetch(`/project/${projectId}/thread/${threadId}/reopen`, {
+    method: 'POST',
+    body: '{}'
+  })
+  return { success: result.ok }
+})
+
+// Delete a comment message
+ipcMain.handle('overleaf:deleteMessage', async (_e, projectId: string, threadId: string, messageId: string) => {
+  if (!overleafSessionCookie) return { success: false }
+  const result = await overleafFetch(`/project/${projectId}/thread/${threadId}/messages/${messageId}`, {
+    method: 'DELETE'
+  })
+  return { success: result.ok }
+})
+
+// Edit a comment message
+ipcMain.handle('overleaf:editMessage', async (_e, projectId: string, threadId: string, messageId: string, content: string) => {
+  if (!overleafSessionCookie) return { success: false }
+  const result = await overleafFetch(`/project/${projectId}/thread/${threadId}/messages/${messageId}/edit`, {
+    method: 'POST',
+    body: JSON.stringify({ content })
+  })
+  return { success: result.ok }
+})
+
+// Delete entire thread
+ipcMain.handle('overleaf:deleteThread', async (_e, projectId: string, docId: string, threadId: string) => {
+  if (!overleafSessionCookie) return { success: false }
+  const result = await overleafFetch(`/project/${projectId}/doc/${docId}/thread/${threadId}`, {
+    method: 'DELETE'
+  })
+  return { success: result.ok }
+})
+
+// Add a new comment: create thread via REST then submit op via Socket.IO
+async function addComment(
+  projectId: string,
+  docId: string,
+  pos: number,
+  text: string,
+  content: string
+): Promise<{ success: boolean; threadId?: string; message?: string }> {
+  if (!overleafSessionCookie) return { success: false, message: 'not_logged_in' }
+
+  // Generate a random threadId (24-char hex like Mongo ObjectId)
+  const threadId = Array.from({ length: 24 }, () => Math.floor(Math.random() * 16).toString(16)).join('')
+
+  // Step 1: Create the thread message via REST
+  const msgResult = await overleafFetch(`/project/${projectId}/thread/${threadId}/messages`, {
+    method: 'POST',
+    body: JSON.stringify({ content })
+  })
+  if (!msgResult.ok) return { success: false, message: `REST failed: ${msgResult.status}` }
+
+  // Step 2: Submit the comment op via Socket.IO WebSocket
+  const hsRes = await overleafFetch(`/socket.io/1/?t=${Date.now()}&projectId=${projectId}`, { raw: true })
+  if (!hsRes.ok) return { success: false, message: 'handshake failed' }
+  const sid = (hsRes.data as string).split(':')[0]
+  if (!sid) return { success: false, message: 'no sid' }
+
+  const { session: electronSession } = await import('electron')
+  const ses = electronSession.fromPartition('overleaf-sio-add-' + Date.now())
+
+  ses.webRequest.onHeadersReceived((details, callback) => {
+    const headers = { ...details.responseHeaders }
+    delete headers['set-cookie']
+    delete headers['Set-Cookie']
+    callback({ responseHeaders: headers })
+  })
+
+  const allCookieParts = overleafSessionCookie.split('; ')
+  for (const sc of hsRes.setCookies) {
+    allCookieParts.push(sc.split(';')[0])
+  }
+  for (const pair of allCookieParts) {
+    const eqIdx = pair.indexOf('=')
+    if (eqIdx < 0) continue
+    try {
+      await ses.cookies.set({
+        url: 'https://www.overleaf.com',
+        name: pair.substring(0, eqIdx),
+        value: pair.substring(eqIdx + 1),
+        domain: '.overleaf.com',
+        path: '/',
+        secure: true
+      })
+    } catch { /* ignore */ }
+  }
+
+  const win = new BrowserWindow({
+    width: 800, height: 600, show: false,
+    webPreferences: { nodeIntegration: false, contextIsolation: false, session: ses }
+  })
+
+  try {
+    win.webContents.on('console-message', (_e, _level, msg) => {
+      console.log('[overleaf-add-comment]', msg)
+    })
+    await win.loadURL('https://www.overleaf.com/login')
+
+    const script = `
+      new Promise(async (mainResolve) => {
+        try {
+          var ws = new WebSocket('wss://' + location.host + '/socket.io/1/websocket/${sid}');
+          var ackId = 0, ackCbs = {}, evtCbs = {};
+
+          ws.onmessage = function(e) {
+            var d = e.data;
+            if (d === '2::') { ws.send('2::'); return; }
+            if (d === '1::') return;
+            var am = d.match(/^6:::(\\d+)\\+([\\s\\S]*)/);
+            if (am) {
+              var cb = ackCbs[parseInt(am[1])];
+              if (cb) { delete ackCbs[parseInt(am[1])]; try { cb(JSON.parse(am[2])); } catch(e2) { cb(null); } }
+              return;
+            }
+            var em2 = d.match(/^5:::(\\{[\\s\\S]*\\})/);
+            if (em2) {
+              try {
+                var evt = JSON.parse(em2[1]);
+                var ecb = evtCbs[evt.name];
+                if (ecb) { delete evtCbs[evt.name]; ecb(evt.args); }
+              } catch(e3) {}
+            }
+          };
+
+          function emitAck(name, args) {
+            return new Promise(function(res) { ackId++; ackCbs[ackId] = res;
+              ws.send('5:' + ackId + '+::' + JSON.stringify({ name: name, args: args })); });
+          }
+          function waitEvent(name) {
+            return new Promise(function(res) { evtCbs[name] = res; });
+          }
+
+          ws.onerror = function() { mainResolve({ error: 'ws_error' }); };
+          ws.onclose = function(ev) { console.log('ws closed: ' + ev.code); };
+
+          ws.onopen = async function() {
+            try {
+              var jpPromise = waitEvent('joinProjectResponse');
+              ws.send('5:::' + JSON.stringify({ name: 'joinProject', args: [{ project_id: '${projectId}' }] }));
+              await jpPromise;
+
+              // Join the doc to submit the op
+              await emitAck('joinDoc', ['${docId}']);
+
+              // Submit the comment op
+              var commentOp = { c: ${JSON.stringify(text)}, p: ${pos}, t: '${threadId}' };
+              console.log('submitting op: ' + JSON.stringify(commentOp));
+              await emitAck('applyOtUpdate', ['${docId}', { doc: '${docId}', op: [commentOp], v: 0 }]);
+
+              await emitAck('leaveDoc', ['${docId}']);
+              ws.close();
+              mainResolve({ success: true });
+            } catch (e) { ws.close(); mainResolve({ error: e.message }); }
+          };
+          setTimeout(function() { ws.close(); mainResolve({ error: 'timeout' }); }, 30000);
+        } catch (e) { mainResolve({ error: e.message }); }
+      });
+    `
+
+    const result = await win.webContents.executeJavaScript(script)
+    console.log('[overleaf] addComment result:', result)
+
+    if (result?.error) return { success: false, message: result.error }
+    return { success: true, threadId }
+  } catch (e) {
+    console.log('[overleaf] addComment error:', e)
+    return { success: false, message: String(e) }
+  } finally {
+    win.close()
+  }
+}
+
+ipcMain.handle('overleaf:addComment', async (_e, projectId: string, docId: string, pos: number, text: string, content: string) => {
+  return addComment(projectId, docId, pos, text, content)
+})
+
+// ── OT / Socket Mode IPC ─────────────────────────────────────────
+
+interface SocketFileNode {
+  name: string
+  path: string
+  isDir: boolean
+  children?: SocketFileNode[]
+  docId?: string
+  fileRefId?: string
+  folderId?: string
+}
+
+function walkRootFolder(folders: RootFolder[]): {
+  files: SocketFileNode[]
+  docPathMap: Record<string, string>
+  pathDocMap: Record<string, string>
+  fileRefs: Array<{ id: string; path: string }>
+  rootFolderId: string
+} {
+  const docPathMap: Record<string, string> = {}
+  const pathDocMap: Record<string, string> = {}
+  const fileRefs: Array<{ id: string; path: string }> = []
+
+  function walkFolder(f: SubFolder | RootFolder, prefix: string): SocketFileNode[] {
+    const nodes: SocketFileNode[] = []
+
+    for (const doc of f.docs || []) {
+      const relPath = prefix + doc.name
+      docPathMap[doc._id] = relPath
+      pathDocMap[relPath] = doc._id
+      nodes.push({
+        name: doc.name,
+        path: relPath,
+        isDir: false,
+        docId: doc._id
+      })
+    }
+
+    for (const ref of f.fileRefs || []) {
+      const relPath = prefix + ref.name
+      fileRefs.push({ id: ref._id, path: relPath })
+      nodes.push({
+        name: ref.name,
+        path: relPath,
+        isDir: false,
+        fileRefId: ref._id
+      })
+    }
+
+    for (const sub of f.folders || []) {
+      const relPath = prefix + sub.name + '/'
+      const children = walkFolder(sub, relPath)
+      nodes.push({
+        name: sub.name,
+        path: relPath,
+        isDir: true,
+        children,
+        folderId: sub._id
+      })
+    }
+
+    return nodes
+  }
+
+  const files: SocketFileNode[] = []
+  const rootFolderId = folders[0]?._id || ''
+  for (const root of folders) {
+    files.push(...walkFolder(root, ''))
+  }
+
+  return { files, docPathMap, pathDocMap, fileRefs, rootFolderId }
+}
+
+ipcMain.handle('ot:connect', async (_e, projectId: string) => {
+  if (!overleafSessionCookie) return { success: false, message: 'not_logged_in' }
+
+  try {
+    overleafSock = new OverleafSocket()
+
+    // Relay events to renderer
+    overleafSock.on('connectionState', (state: string) => {
+      mainWindow?.webContents.send('ot:connectionState', state)
+    })
+
+    // otUpdateApplied: server acknowledges our op (ack signal for OT client)
+    overleafSock.on('serverEvent', (name: string, args: unknown[]) => {
+      if (name === 'otUpdateApplied') {
+        const update = args[0] as { doc?: string; v?: number } | undefined
+        if (update?.doc) {
+          mainWindow?.webContents.send('ot:ack', { docId: update.doc })
+        }
       }
     })
-    proc.on('error', () => {
-      resolve({ loggedIn: false, email: '' })
+
+    overleafSock.on('docRejoined', (docId: string, result: JoinDocResult) => {
+      mainWindow?.webContents.send('ot:docRejoined', {
+        docId,
+        content: result.docLines.join('\n'),
+        version: result.version
+      })
+    })
+
+    const projectResult = await overleafSock.connect(projectId, overleafSessionCookie)
+    const { files, docPathMap, pathDocMap, fileRefs, rootFolderId } = walkRootFolder(projectResult.project.rootFolder)
+
+    // Set up compilation manager
+    compilationManager = new CompilationManager(projectId, overleafSessionCookie)
+
+    // Set up file sync bridge for bidirectional sync
+    const tmpDir = compilationManager.dir
+    fileSyncBridge = new FileSyncBridge(overleafSock, tmpDir, docPathMap, pathDocMap, mainWindow!)
+    fileSyncBridge.start().catch((e) => {
+      console.log('[ot:connect] fileSyncBridge start error:', e)
+    })
+
+    return {
+      success: true,
+      files,
+      project: {
+        name: projectResult.project.name,
+        rootDocId: projectResult.project.rootDoc_id
+      },
+      docPathMap,
+      pathDocMap,
+      fileRefs,
+      rootFolderId
+    }
+  } catch (e) {
+    console.log('[ot:connect] error:', e)
+    return { success: false, message: String(e) }
+  }
+})
+
+ipcMain.handle('ot:disconnect', async () => {
+  await fileSyncBridge?.stop()
+  fileSyncBridge = null
+  overleafSock?.disconnect()
+  overleafSock = null
+  await compilationManager?.cleanup()
+  compilationManager = null
+})
+
+// Track per-doc event handlers for cleanup on leaveDoc
+const docEventHandlers = new Map<string, (name: string, args: unknown[]) => void>()
+
+ipcMain.handle('ot:joinDoc', async (_e, docId: string) => {
+  if (!overleafSock) return { success: false, message: 'not_connected' }
+
+  try {
+    const result = await overleafSock.joinDoc(docId)
+    const content = (result.docLines || []).join('\n')
+
+    // Update compilation manager with doc content
+    if (compilationManager && overleafSock.projectData) {
+      const { docPathMap } = walkRootFolder(overleafSock.projectData.project.rootFolder)
+      const relPath = docPathMap[docId]
+      if (relPath) {
+        compilationManager.setDocContent(relPath, content)
+      }
+    }
+
+    // Notify bridge that editor is taking over this doc
+    fileSyncBridge?.addEditorDoc(docId)
+
+    // Remove existing handler if rejoining
+    const existingHandler = docEventHandlers.get(docId)
+    if (existingHandler) overleafSock.removeListener('serverEvent', existingHandler)
+
+    // Set up relay for remote ops on this doc
+    const handler = (name: string, args: unknown[]) => {
+      if (name === 'otUpdateApplied') {
+        const update = args[0] as { doc?: string; op?: unknown[]; v?: number } | undefined
+        if (update?.doc === docId && update.op) {
+          mainWindow?.webContents.send('ot:remoteOp', {
+            docId: update.doc,
+            ops: update.op,
+            version: update.v
+          })
+        }
+      }
+    }
+    docEventHandlers.set(docId, handler)
+    overleafSock.on('serverEvent', handler)
+
+    return {
+      success: true,
+      content,
+      version: result.version,
+      ranges: result.ranges
+    }
+  } catch (e) {
+    console.log('[ot:joinDoc] error:', e)
+    return { success: false, message: String(e) }
+  }
+})
+
+ipcMain.handle('ot:leaveDoc', async (_e, docId: string) => {
+  if (!overleafSock) return
+  try {
+    // Remove event handler for this doc
+    const handler = docEventHandlers.get(docId)
+    if (handler) {
+      overleafSock.removeListener('serverEvent', handler)
+      docEventHandlers.delete(docId)
+    }
+    // Bridge takes back OT ownership — do NOT leaveDoc on the socket,
+    // the bridge keeps the doc joined for sync
+    fileSyncBridge?.removeEditorDoc(docId)
+  } catch (e) {
+    console.log('[ot:leaveDoc] error:', e)
+  }
+})
+
+ipcMain.handle('ot:sendOp', async (_e, docId: string, ops: unknown[], version: number, hash: string) => {
+  if (!overleafSock) return
+  try {
+    await overleafSock.applyOtUpdate(docId, ops, version, hash)
+  } catch (e) {
+    console.log('[ot:sendOp] error:', e)
+  }
+})
+
+// Renderer → bridge: editor content changed (for disk sync)
+ipcMain.handle('sync:contentChanged', async (_e, docId: string, content: string) => {
+  fileSyncBridge?.onEditorContentChanged(docId, content)
+})
+
+ipcMain.handle('overleaf:listProjects', async () => {
+  if (!overleafSessionCookie) return { success: false, message: 'not_logged_in' }
+
+  // POST /api/project returns full project data (lastUpdated, owner, etc.)
+  const result = await overleafFetch('/api/project', {
+    method: 'POST',
+    body: JSON.stringify({
+      filters: {},
+      page: { size: 200 },
+      sort: { by: 'lastUpdated', order: 'desc' }
     })
   })
+  if (!result.ok) return { success: false, message: `HTTP ${result.status}` }
+
+  const data = result.data as { totalSize?: number; projects?: unknown[] }
+  const projects = (data.projects || []) as Array<{
+    id?: string; _id?: string; name: string; lastUpdated: string
+    owner?: { firstName: string; lastName: string; email?: string }
+    lastUpdatedBy?: { firstName: string; lastName: string; email?: string } | null
+    accessLevel?: string
+    source?: string
+  }>
+
+  return {
+    success: true,
+    projects: projects.map((p) => ({
+      id: p.id || p._id || '',
+      name: p.name,
+      lastUpdated: p.lastUpdated,
+      owner: p.owner ? { firstName: p.owner.firstName, lastName: p.owner.lastName, email: p.owner.email } : undefined,
+      lastUpdatedBy: p.lastUpdatedBy ? { firstName: p.lastUpdatedBy.firstName, lastName: p.lastUpdatedBy.lastName } : null,
+      accessLevel: p.accessLevel || 'unknown',
+      source: p.source || ''
+    }))
+  }
 })
 
-// Remove credentials from Keychain
-ipcMain.handle('overleaf:logout', async () => {
-  return new Promise<void>((resolve) => {
-    const proc = spawn('git', ['credential-osxkeychain', 'erase'])
-    proc.stdin?.write(`protocol=https\nhost=git.overleaf.com\n\n`)
-    proc.stdin?.end()
-    proc.on('close', () => resolve())
+ipcMain.handle('overleaf:createProject', async (_e, name: string) => {
+  if (!overleafSessionCookie) return { success: false, message: 'not_logged_in' }
+  const result = await overleafFetch('/api/project/new', {
+    method: 'POST',
+    body: JSON.stringify({ projectName: name })
+  })
+  if (!result.ok) return { success: false, message: `HTTP ${result.status}` }
+  const data = result.data as { project_id?: string; _id?: string }
+  return { success: true, projectId: data.project_id || data._id }
+})
+
+ipcMain.handle('overleaf:uploadProject', async () => {
+  if (!overleafSessionCookie) return { success: false, message: 'not_logged_in' }
+
+  const { canceled, filePaths } = await dialog.showOpenDialog({
+    title: 'Upload Project (.zip)',
+    filters: [{ name: 'ZIP Archives', extensions: ['zip'] }],
+    properties: ['openFile']
+  })
+  if (canceled || filePaths.length === 0) return { success: false, message: 'cancelled' }
+
+  const zipPath = filePaths[0]
+  const zipData = await readFile(zipPath)
+  const fileName = basename(zipPath)
+
+  // Multipart upload
+  const boundary = '----FormBoundary' + Math.random().toString(36).slice(2)
+  const header = `--${boundary}\r\nContent-Disposition: form-data; name="qqfile"; filename="${fileName}"\r\nContent-Type: application/zip\r\n\r\n`
+  const footer = `\r\n--${boundary}--\r\n`
+  const headerBuf = Buffer.from(header)
+  const footerBuf = Buffer.from(footer)
+  const body = Buffer.concat([headerBuf, zipData, footerBuf])
+
+  return new Promise((resolve) => {
+    const req = net.request({
+      method: 'POST',
+      url: 'https://www.overleaf.com/api/project/new/upload'
+    })
+    req.setHeader('Cookie', overleafSessionCookie)
+    req.setHeader('Content-Type', `multipart/form-data; boundary=${boundary}`)
+    req.setHeader('User-Agent', 'Mozilla/5.0')
+    if (overleafCsrfToken) req.setHeader('x-csrf-token', overleafCsrfToken)
+
+    let resBody = ''
+    req.on('response', (res) => {
+      res.on('data', (chunk) => { resBody += chunk.toString() })
+      res.on('end', () => {
+        try {
+          const data = JSON.parse(resBody) as { success?: boolean; project_id?: string }
+          if (data.success !== false && data.project_id) {
+            resolve({ success: true, projectId: data.project_id })
+          } else {
+            resolve({ success: false, message: 'Upload failed' })
+          }
+        } catch {
+          resolve({ success: false, message: 'Invalid response' })
+        }
+      })
+    })
+    req.on('error', (e) => resolve({ success: false, message: String(e) }))
+    req.write(body)
+    req.end()
   })
 })
 
-// Git operations for existing repos — use osxkeychain
-ipcMain.handle('git:pull', async (_e, cwd: string) => {
-  return gitSpawn(['pull'], cwd)
+// ── File Operations via Overleaf REST API ──────────────────────
+
+ipcMain.handle('overleaf:renameEntity', async (_e, projectId: string, entityType: string, entityId: string, newName: string) => {
+  if (!overleafSessionCookie) return { success: false, message: 'not_logged_in' }
+  const result = await overleafFetch(`/project/${projectId}/${entityType}/${entityId}/rename`, {
+    method: 'POST',
+    body: JSON.stringify({ name: newName })
+  })
+  return { success: result.ok, message: result.ok ? '' : `HTTP ${result.status}` }
 })
 
-ipcMain.handle('git:push', async (_e, cwd: string) => {
-  const add = await gitSpawn(['add', '-A'], cwd)
-  if (!add.success) return add
-  await gitSpawn(['commit', '-m', `Sync from ClaudeTeX ${new Date().toISOString()}`], cwd)
-  return gitSpawn(['push'], cwd)
+ipcMain.handle('overleaf:deleteEntity', async (_e, projectId: string, entityType: string, entityId: string) => {
+  if (!overleafSessionCookie) return { success: false, message: 'not_logged_in' }
+  const result = await overleafFetch(`/project/${projectId}/${entityType}/${entityId}`, {
+    method: 'DELETE'
+  })
+  return { success: result.ok, message: result.ok ? '' : `HTTP ${result.status}` }
 })
 
-ipcMain.handle('git:status', async (_e, cwd: string) => {
-  const result = await gitSpawn(['status', '--porcelain'], cwd)
-  return { isGit: result.success, status: result.message }
+ipcMain.handle('overleaf:createDoc', async (_e, projectId: string, parentFolderId: string, name: string) => {
+  if (!overleafSessionCookie) return { success: false, message: 'not_logged_in' }
+  const result = await overleafFetch(`/project/${projectId}/doc`, {
+    method: 'POST',
+    body: JSON.stringify({ name, parent_folder_id: parentFolderId })
+  })
+  return { success: result.ok, data: result.data, message: result.ok ? '' : `HTTP ${result.status}` }
 })
 
-// ── Shell: open external ─────────────────────────────────────────
+ipcMain.handle('overleaf:createFolder', async (_e, projectId: string, parentFolderId: string, name: string) => {
+  if (!overleafSessionCookie) return { success: false, message: 'not_logged_in' }
+  const result = await overleafFetch(`/project/${projectId}/folder`, {
+    method: 'POST',
+    body: JSON.stringify({ name, parent_folder_id: parentFolderId })
+  })
+  return { success: result.ok, data: result.data, message: result.ok ? '' : `HTTP ${result.status}` }
+})
+
+// Fetch comment ranges from ALL docs (for ReviewPanel)
+ipcMain.handle('ot:fetchAllCommentContexts', async () => {
+  if (!overleafSock?.projectData) return { success: false }
+
+  const { docPathMap } = walkRootFolder(overleafSock.projectData.project.rootFolder)
+  const contexts: Record<string, { file: string; text: string; pos: number }> = {}
+
+  for (const [docId, relPath] of Object.entries(docPathMap)) {
+    try {
+      const alreadyJoined = docEventHandlers.has(docId)
+      const result = await overleafSock.joinDoc(docId)
+      if (result.ranges?.comments) {
+        for (const c of result.ranges.comments) {
+          if (c.op?.t) {
+            contexts[c.op.t] = { file: relPath, text: c.op.c || '', pos: c.op.p || 0 }
+          }
+        }
+      }
+      if (!alreadyJoined) {
+        await overleafSock.leaveDoc(docId)
+      }
+    } catch (e) {
+      console.log(`[fetchCommentContexts] failed for ${relPath}:`, e)
+    }
+  }
+
+  return { success: true, contexts }
+})
+
+ipcMain.handle('overleaf:socketCompile', async (_e, mainTexRelPath: string) => {
+  if (!compilationManager || !overleafSock?.projectData) {
+    return { success: false, log: 'No compilation manager or not connected', pdfPath: '' }
+  }
+
+  const { docPathMap, fileRefs } = walkRootFolder(overleafSock.projectData.project.rootFolder)
+
+  // Bridge already keeps all docs synced to disk. Sync content to compilation manager.
+  if (fileSyncBridge) {
+    for (const [docId, relPath] of Object.entries(docPathMap)) {
+      const content = fileSyncBridge.getDocContent(relPath)
+      if (content !== undefined) {
+        compilationManager.setDocContent(relPath, content)
+      }
+    }
+  } else {
+    // Fallback: fetch docs from socket if bridge isn't available
+    const allDocIds = Object.keys(docPathMap)
+    for (const docId of allDocIds) {
+      const relPath = docPathMap[docId]
+      if (docEventHandlers.has(docId) && compilationManager.hasDoc(relPath)) continue
+      try {
+        const alreadyJoined = docEventHandlers.has(docId)
+        const result = await overleafSock.joinDoc(docId)
+        const content = (result.docLines || []).join('\n')
+        compilationManager.setDocContent(relPath, content)
+        if (!alreadyJoined) {
+          await overleafSock.leaveDoc(docId)
+        }
+      } catch (e) {
+        console.log(`[socketCompile] failed to fetch doc ${relPath}:`, e)
+      }
+    }
+  }
+
+  // Download all binary files (images, .bst, etc.)
+  await compilationManager.syncBinaries(fileRefs)
+
+  return compilationManager.compile(mainTexRelPath, (data) => {
+    mainWindow?.webContents.send('latex:log', data)
+  })
+})
+
+/// ── Shell: open external ─────────────────────────────────────────
 
 ipcMain.handle('shell:openExternal', async (_e, url: string) => {
   await shell.openExternal(url)
@@ -559,12 +968,18 @@ ipcMain.handle('shell:showInFinder', async (_e, path: string) => {
 
 // ── App Lifecycle ────────────────────────────────────────────────
 
-app.whenReady().then(createWindow)
+app.whenReady().then(async () => {
+  createWindow()
+  sessionLoadPromise = loadOverleafSession()
+
+})
 
 app.on('window-all-closed', () => {
   ptyInstance?.kill()
-  fileWatcher?.close()
-  compileProcess?.kill()
+  fileSyncBridge?.stop()
+  fileSyncBridge = null
+  overleafSock?.disconnect()
+  compilationManager?.cleanup()
   app.quit()
 })
 

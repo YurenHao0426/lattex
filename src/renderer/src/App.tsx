@@ -1,66 +1,96 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, Component, type ReactNode } from 'react'
 import { PanelGroup, Panel, PanelResizeHandle } from 'react-resizable-panels'
 import { useAppStore } from './stores/appStore'
-import { showConfirm } from './hooks/useModal'
 import ModalProvider from './components/ModalProvider'
-import OverleafConnect from './components/OverleafConnect'
+import ProjectList from './components/ProjectList'
 import Toolbar from './components/Toolbar'
 import FileTree from './components/FileTree'
 import Editor from './components/Editor'
 import PdfViewer from './components/PdfViewer'
 import Terminal from './components/Terminal'
+import ReviewPanel from './components/ReviewPanel'
 import StatusBar from './components/StatusBar'
+import type { OverleafDocSync } from './ot/overleafSync'
+
+export const activeDocSyncs = new Map<string, OverleafDocSync>()
+
+class ErrorBoundary extends Component<{ children: ReactNode }, { error: Error | null }> {
+  state = { error: null as Error | null }
+  static getDerivedStateFromError(error: Error) { return { error } }
+  render() {
+    if (this.state.error) {
+      return (
+        <div style={{ padding: 40, color: '#c00', fontFamily: 'monospace', whiteSpace: 'pre-wrap' }}>
+          <h2>Render Error</h2>
+          <p>{this.state.error.message}</p>
+          <pre>{this.state.error.stack}</pre>
+        </div>
+      )
+    }
+    return this.props.children
+  }
+}
 
 export default function App() {
   const {
-    projectPath,
-    setProjectPath,
-    setFiles,
+    screen,
+    setScreen,
+    setStatusMessage,
     showTerminal,
     showFileTree,
-    setIsGitRepo,
-    setGitStatus,
-    setStatusMessage
+    showReviewPanel,
   } = useAppStore()
 
-  const refreshFiles = useCallback(async () => {
-    if (!projectPath) return
-    const files = await window.api.readDir(projectPath)
-    setFiles(files)
-  }, [projectPath, setFiles])
+  const [checkingSession, setCheckingSession] = useState(true)
 
-  // Load project
+  // Check session on startup
   useEffect(() => {
-    if (!projectPath) return
+    window.api.overleafHasWebSession().then(({ loggedIn }) => {
+      setScreen(loggedIn ? 'projects' : 'login')
+      setCheckingSession(false)
+    })
+  }, [setScreen])
 
-    refreshFiles()
-    window.api.watchStart(projectPath)
+  // OT event listeners (always active when in editor)
+  useEffect(() => {
+    if (screen !== 'editor') return
 
-    // Check git status
-    window.api.gitStatus(projectPath).then(({ isGit, status }) => {
-      setIsGitRepo(isGit)
-      setGitStatus(status)
+    const unsubRemoteOp = window.api.onOtRemoteOp((data) => {
+      const sync = activeDocSyncs.get(data.docId)
+      if (sync) sync.onRemoteOps(data.ops as any, data.version)
     })
 
-    // Auto-detect main document if not set
-    if (!useAppStore.getState().mainDocument) {
-      window.api.findMainTex(projectPath).then((mainTex) => {
-        if (mainTex) {
-          useAppStore.getState().setMainDocument(mainTex)
-          setStatusMessage(`Main document: ${mainTex.split('/').pop()}`)
-        }
-      })
-    }
+    const unsubAck = window.api.onOtAck((data) => {
+      const sync = activeDocSyncs.get(data.docId)
+      if (sync) sync.onAck()
+    })
 
-    const unsub = window.api.onWatchChange(() => {
-      refreshFiles()
+    const unsubState = window.api.onOtConnectionState((state) => {
+      useAppStore.getState().setConnectionState(state as any)
+      if (state === 'reconnecting') setStatusMessage('Reconnecting...')
+      else if (state === 'connected') setStatusMessage('Connected')
+      else if (state === 'disconnected') setStatusMessage('Disconnected')
+    })
+
+    const unsubRejoined = window.api.onOtDocRejoined((data) => {
+      const sync = activeDocSyncs.get(data.docId)
+      if (sync) sync.reset(data.version, data.content)
+    })
+
+    // Listen for external edits from file sync bridge (disk changes)
+    const unsubExternalEdit = window.api.onSyncExternalEdit((data) => {
+      const sync = activeDocSyncs.get(data.docId)
+      if (sync) sync.replaceContent(data.content)
     })
 
     return () => {
-      unsub()
-      window.api.watchStop()
+      unsubRemoteOp()
+      unsubAck()
+      unsubState()
+      unsubRejoined()
+      unsubExternalEdit()
     }
-  }, [projectPath, refreshFiles, setIsGitRepo, setGitStatus])
+  }, [screen, setStatusMessage])
 
   // Compile log listener
   useEffect(() => {
@@ -73,11 +103,8 @@ export default function App() {
   // Keyboard shortcuts
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
+      if (screen !== 'editor') return
       if (e.metaKey || e.ctrlKey) {
-        if (e.key === 's') {
-          e.preventDefault()
-          handleSave()
-        }
         if (e.key === 'b') {
           e.preventDefault()
           handleCompile()
@@ -90,159 +117,170 @@ export default function App() {
     }
     window.addEventListener('keydown', handler)
     return () => window.removeEventListener('keydown', handler)
-  }, [])
-
-  const handleSave = async () => {
-    const { activeTab, fileContents } = useAppStore.getState()
-    if (!activeTab || !fileContents[activeTab]) return
-    await window.api.writeFile(activeTab, fileContents[activeTab])
-    useAppStore.getState().markModified(activeTab, false)
-    setStatusMessage('Saved')
-  }
+  }, [screen])
 
   const handleCompile = async () => {
-    const { activeTab, mainDocument } = useAppStore.getState()
-    const target = mainDocument || activeTab
-    if (!target || !target.endsWith('.tex')) return
-
-    useAppStore.getState().setCompiling(true)
-    useAppStore.getState().clearCompileLog()
+    const state = useAppStore.getState()
+    const mainDoc = state.mainDocument || state.overleafProject?.rootDocId
+    if (!mainDoc) {
+      setStatusMessage('No main document set')
+      return
+    }
+    const relPath = state.docPathMap[mainDoc] || mainDoc
+    state.setCompiling(true)
+    state.clearCompileLog()
     setStatusMessage('Compiling...')
 
-    const result = await window.api.compile(target) as {
-      success: boolean; log: string; missingPackages?: string[]
-    }
+    const result = await window.api.overleafSocketCompile(relPath)
 
-    console.log('[compile] result.success:', result.success, 'log length:', result.log?.length, 'missingPkgs:', result.missingPackages)
-
-    // Ensure compile log is populated (fallback if streaming events missed)
     const storeLog = useAppStore.getState().compileLog
-    console.log('[compile] storeLog length:', storeLog?.length)
     if (!storeLog && result.log) {
       useAppStore.getState().appendCompileLog(result.log)
     }
-
-    // Always try to load PDF BEFORE setting compiling=false
-    const pdfPath = await window.api.getPdfPath(target)
-    console.log('[compile] checking pdfPath:', pdfPath)
-    try {
-      const s = await window.api.fileStat(pdfPath)
-      console.log('[compile] PDF exists, size:', s.size)
-      useAppStore.getState().setPdfPath(pdfPath)
-    } catch (err) {
-      console.log('[compile] PDF not found:', err)
+    if (result.pdfPath) {
+      useAppStore.getState().setPdfPath(result.pdfPath)
     }
-
-    // Now signal compilation done
     useAppStore.getState().setCompiling(false)
+    setStatusMessage(result.success ? 'Compiled successfully' : 'Compilation had errors — check Log tab')
+  }
 
-    // Missing packages detected — offer to install
-    if (result.missingPackages && result.missingPackages.length > 0) {
-      const pkgs = result.missingPackages
-      const ok = await showConfirm(
-        'Missing LaTeX Packages',
-        `The following packages are needed:\n\n${pkgs.join(', ')}\n\nInstall them now? (may require your password in terminal)`,
-      )
-      if (ok) {
-        setStatusMessage(`Installing ${pkgs.join(', ')}...`)
-        const installResult = await window.api.installTexPackages(pkgs)
-        if (installResult.success) {
-          setStatusMessage('Packages installed. Recompiling...')
-          handleCompile()
-          return
-        } else if (installResult.message === 'need_sudo') {
-          setStatusMessage('Need sudo — installing via terminal...')
-          useAppStore.getState().showTerminal || useAppStore.getState().toggleTerminal()
-          await window.api.ptyWrite(`sudo tlmgr install ${pkgs.join(' ')}\n`)
-          setStatusMessage('Enter your password in terminal, then recompile with Cmd+B')
-          return
-        } else {
-          setStatusMessage('Package install failed')
+  const handleLogin = async () => {
+    const result = await window.api.overleafWebLogin()
+    if (result.success) {
+      setScreen('projects')
+    }
+  }
+
+  const handleOpenProject = async (pid: string) => {
+    setScreen('editor')
+
+    // Auto-open root doc
+    const store = useAppStore.getState()
+    const rootDocId = store.overleafProject?.rootDocId
+    if (rootDocId) {
+      const relPath = store.docPathMap[rootDocId]
+      if (relPath) {
+        setStatusMessage('Opening root document...')
+        const result = await window.api.otJoinDoc(rootDocId)
+        if (result.success && result.content !== undefined) {
+          const fileName = relPath.split('/').pop() || relPath
+          useAppStore.getState().setFileContent(relPath, result.content)
+          useAppStore.getState().openFile(relPath, fileName)
+          useAppStore.getState().setMainDocument(rootDocId)
+          if (result.version !== undefined) {
+            useAppStore.getState().setDocVersion(rootDocId, result.version)
+          }
+          if (result.ranges?.comments) {
+            const contexts: Record<string, { file: string; text: string; pos: number }> = {}
+            for (const c of result.ranges.comments) {
+              if (c.op?.t) {
+                contexts[c.op.t] = { file: relPath, text: c.op.c || '', pos: c.op.p || 0 }
+              }
+            }
+            useAppStore.getState().setCommentContexts(contexts)
+          }
+          setStatusMessage(`${store.overleafProject?.name || 'Project'}`)
         }
       }
     }
-
-    if (result.success) {
-      setStatusMessage('Compiled successfully')
-    } else {
-      setStatusMessage('Compilation had errors — check Log tab')
-    }
   }
 
-  const [showOverleaf, setShowOverleaf] = useState(false)
-
-  const handleOpenProject = async () => {
-    const path = await window.api.openProject()
-    if (path) setProjectPath(path)
+  const handleBackToProjects = async () => {
+    await window.api.otDisconnect()
+    activeDocSyncs.forEach((s) => s.destroy())
+    activeDocSyncs.clear()
+    useAppStore.getState().resetEditorState()
+    setScreen('projects')
   }
 
-  return (
-    <>
-      <ModalProvider />
-      {showOverleaf && (
-        <OverleafConnect
-          onConnected={(path) => {
-            setShowOverleaf(false)
-            setProjectPath(path)
-          }}
-          onCancel={() => setShowOverleaf(false)}
-        />
-      )}
-      {!projectPath ? (
+  if (checkingSession) {
+    return (
+      <div className="welcome-screen">
+        <div className="welcome-drag-bar" />
+        <div className="welcome-content">
+          <div className="overleaf-spinner" />
+        </div>
+      </div>
+    )
+  }
+
+  // Login screen
+  if (screen === 'login') {
+    return (
+      <>
+        <ModalProvider />
         <div className="welcome-screen">
           <div className="welcome-drag-bar" />
           <div className="welcome-content">
             <h1>ClaudeTeX</h1>
-            <p>LaTeX editor with AI and Overleaf sync</p>
-            <button className="btn btn-primary btn-large" onClick={handleOpenProject}>
-              Open Project
-            </button>
-            <button className="btn btn-secondary btn-large" onClick={() => setShowOverleaf(true)}>
-              Clone from Overleaf
+            <p>LaTeX editor with real-time Overleaf sync</p>
+            <button className="btn btn-primary btn-large" onClick={handleLogin}>
+              Sign in to Overleaf
             </button>
           </div>
         </div>
-      ) : (
-        <div className="app">
-          <Toolbar onCompile={handleCompile} onSave={handleSave} onOpenProject={handleOpenProject} />
-          <div className="main-content">
-            <PanelGroup direction="horizontal">
-              {showFileTree && (
-                <>
-                  <Panel defaultSize={18} minSize={12} maxSize={35}>
-                    <FileTree />
-                  </Panel>
-                  <PanelResizeHandle className="resize-handle resize-handle-h" />
-                </>
-              )}
-              <Panel minSize={30}>
-                <PanelGroup direction="vertical">
-                  <Panel defaultSize={showTerminal ? 70 : 100} minSize={30}>
-                    <PanelGroup direction="horizontal">
-                      <Panel defaultSize={50} minSize={25}>
-                        <Editor />
-                      </Panel>
-                      <PanelResizeHandle className="resize-handle resize-handle-h" />
-                      <Panel defaultSize={50} minSize={20}>
-                        <PdfViewer />
-                      </Panel>
-                    </PanelGroup>
-                  </Panel>
-                  {showTerminal && (
-                    <>
-                      <PanelResizeHandle className="resize-handle resize-handle-v" />
-                      <Panel defaultSize={30} minSize={15} maxSize={60}>
-                        <Terminal />
-                      </Panel>
-                    </>
-                  )}
-                </PanelGroup>
-              </Panel>
-            </PanelGroup>
-          </div>
-          <StatusBar />
+      </>
+    )
+  }
+
+  // Project list screen
+  if (screen === 'projects') {
+    return (
+      <>
+        <ModalProvider />
+        <ProjectList onOpenProject={handleOpenProject} />
+      </>
+    )
+  }
+
+  // Editor screen
+  return (
+    <ErrorBoundary>
+      <ModalProvider />
+      <div className="app">
+        <Toolbar onCompile={handleCompile} onBack={handleBackToProjects} />
+        <div className="main-content">
+          <PanelGroup direction="horizontal">
+            {showFileTree && (
+              <>
+                <Panel defaultSize={18} minSize={12} maxSize={35}>
+                  <FileTree />
+                </Panel>
+                <PanelResizeHandle className="resize-handle resize-handle-h" />
+              </>
+            )}
+            <Panel minSize={30}>
+              <PanelGroup direction="vertical">
+                <Panel defaultSize={showTerminal ? 70 : 100} minSize={30}>
+                  <PanelGroup direction="horizontal">
+                    <Panel defaultSize={50} minSize={25}>
+                      <Editor />
+                    </Panel>
+                    <PanelResizeHandle className="resize-handle resize-handle-h" />
+                    <Panel defaultSize={50} minSize={20}>
+                      <PdfViewer />
+                    </Panel>
+                  </PanelGroup>
+                </Panel>
+                {showTerminal && (
+                  <>
+                    <PanelResizeHandle className="resize-handle resize-handle-v" />
+                    <Panel defaultSize={30} minSize={15} maxSize={60}>
+                      <Terminal />
+                    </Panel>
+                  </>
+                )}
+              </PanelGroup>
+            </Panel>
+          </PanelGroup>
+          {showReviewPanel && (
+            <div className="review-sidebar">
+              <ReviewPanel />
+            </div>
+          )}
         </div>
-      )}
-    </>
+        <StatusBar />
+      </div>
+    </ErrorBoundary>
   )
 }

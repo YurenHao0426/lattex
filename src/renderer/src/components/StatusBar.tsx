@@ -1,9 +1,18 @@
 import { useAppStore } from '../stores/appStore'
 
 export default function StatusBar() {
-  const { statusMessage, isGitRepo, gitStatus, activeTab, compiling } = useAppStore()
+  const { statusMessage, activeTab, compiling, connectionState } = useAppStore()
 
   const lineInfo = activeTab ? activeTab.split('/').pop() : ''
+
+  const connectionLabel = connectionState === 'connected' ? 'Connected'
+    : connectionState === 'connecting' ? 'Connecting...'
+    : connectionState === 'reconnecting' ? 'Reconnecting...'
+    : 'Disconnected'
+
+  const connectionDot = connectionState === 'connected' ? 'connection-dot-green'
+    : connectionState === 'connecting' || connectionState === 'reconnecting' ? 'connection-dot-yellow'
+    : 'connection-dot-red'
 
   return (
     <div className="status-bar">
@@ -12,11 +21,10 @@ export default function StatusBar() {
         <span className="status-message">{statusMessage}</span>
       </div>
       <div className="status-right">
-        {isGitRepo && (
-          <span className="status-git">
-            Git{gitStatus ? ` (${gitStatus.split('\n').filter(Boolean).length} changes)` : ' (clean)'}
-          </span>
-        )}
+        <span className="status-connection">
+          <span className={`connection-dot ${connectionDot}`} />
+          {connectionLabel}
+        </span>
         {lineInfo && <span className="status-file">{lineInfo}</span>}
         <span className="status-encoding">UTF-8</span>
         <span className="status-lang">LaTeX</span>

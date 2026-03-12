@@ -1,32 +1,12 @@
 import { contextBridge, ipcRenderer } from 'electron'
+import { createHash } from 'crypto'
 
 const api = {
   // File system
-  openProject: () => ipcRenderer.invoke('dialog:openProject'),
-  selectSaveDir: () => ipcRenderer.invoke('dialog:selectSaveDir'),
-  readDir: (path: string) => ipcRenderer.invoke('fs:readDir', path),
   readFile: (path: string) => ipcRenderer.invoke('fs:readFile', path),
-  findMainTex: (dir: string) => ipcRenderer.invoke('fs:findMainTex', dir) as Promise<string | null>,
   readBinary: (path: string) => ipcRenderer.invoke('fs:readBinary', path) as Promise<ArrayBuffer>,
-  writeFile: (path: string, content: string) => ipcRenderer.invoke('fs:writeFile', path, content),
-  createFile: (dir: string, name: string) => ipcRenderer.invoke('fs:createFile', dir, name),
-  createDir: (dir: string, name: string) => ipcRenderer.invoke('fs:createDir', dir, name),
-  renameFile: (oldPath: string, newPath: string) => ipcRenderer.invoke('fs:rename', oldPath, newPath),
-  deleteFile: (path: string) => ipcRenderer.invoke('fs:delete', path),
-  fileStat: (path: string) => ipcRenderer.invoke('fs:stat', path),
-
-  // File watcher
-  watchStart: (path: string) => ipcRenderer.invoke('watcher:start', path),
-  watchStop: () => ipcRenderer.invoke('watcher:stop'),
-  onWatchChange: (cb: (data: { event: string; path: string }) => void) => {
-    const handler = (_e: Electron.IpcRendererEvent, data: { event: string; path: string }) => cb(data)
-    ipcRenderer.on('watcher:change', handler)
-    return () => ipcRenderer.removeListener('watcher:change', handler)
-  },
 
   // LaTeX
-  compile: (path: string) => ipcRenderer.invoke('latex:compile', path),
-  getPdfPath: (texPath: string) => ipcRenderer.invoke('latex:getPdfPath', texPath),
   onCompileLog: (cb: (log: string) => void) => {
     const handler = (_e: Electron.IpcRendererEvent, log: string) => cb(log)
     ipcRenderer.on('latex:log', handler)
@@ -49,24 +29,120 @@ const api = {
     return () => ipcRenderer.removeListener('pty:exit', handler)
   },
 
-  // Overleaf
-  overleafCloneWithAuth: (projectId: string, dest: string, token: string, remember: boolean) =>
-    ipcRenderer.invoke('overleaf:cloneWithAuth', projectId, dest, token, remember) as Promise<{ success: boolean; message: string; detail: string }>,
-  overleafCheck: () => ipcRenderer.invoke('overleaf:check') as Promise<{ loggedIn: boolean; email: string }>,
-  overleafLogout: () => ipcRenderer.invoke('overleaf:logout'),
-  gitPull: (cwd: string) => ipcRenderer.invoke('git:pull', cwd),
-  gitPush: (cwd: string) => ipcRenderer.invoke('git:push', cwd),
-  gitStatus: (cwd: string) => ipcRenderer.invoke('git:status', cwd),
-
   // SyncTeX
   synctexEdit: (pdfPath: string, page: number, x: number, y: number) =>
     ipcRenderer.invoke('synctex:editFromPdf', pdfPath, page, x, y) as Promise<{ file: string; line: number } | null>,
-  synctexView: (texPath: string, line: number, pdfPath: string) =>
-    ipcRenderer.invoke('synctex:viewFromSource', texPath, line, pdfPath) as Promise<{ page: number; x: number; y: number } | null>,
 
-  // LaTeX package management
-  installTexPackages: (packages: string[]) =>
-    ipcRenderer.invoke('latex:installPackages', packages) as Promise<{ success: boolean; message: string; packages?: string[] }>,
+  // Overleaf web session (comments)
+  overleafWebLogin: () => ipcRenderer.invoke('overleaf:webLogin') as Promise<{ success: boolean }>,
+  overleafHasWebSession: () => ipcRenderer.invoke('overleaf:hasWebSession') as Promise<{ loggedIn: boolean }>,
+  overleafGetThreads: (projectId: string) =>
+    ipcRenderer.invoke('overleaf:getThreads', projectId) as Promise<{ success: boolean; threads?: Record<string, unknown>; message?: string }>,
+  overleafReplyThread: (projectId: string, threadId: string, content: string) =>
+    ipcRenderer.invoke('overleaf:replyThread', projectId, threadId, content) as Promise<{ success: boolean }>,
+  overleafResolveThread: (projectId: string, threadId: string) =>
+    ipcRenderer.invoke('overleaf:resolveThread', projectId, threadId) as Promise<{ success: boolean }>,
+  overleafReopenThread: (projectId: string, threadId: string) =>
+    ipcRenderer.invoke('overleaf:reopenThread', projectId, threadId) as Promise<{ success: boolean }>,
+  overleafDeleteMessage: (projectId: string, threadId: string, messageId: string) =>
+    ipcRenderer.invoke('overleaf:deleteMessage', projectId, threadId, messageId) as Promise<{ success: boolean }>,
+  overleafEditMessage: (projectId: string, threadId: string, messageId: string, content: string) =>
+    ipcRenderer.invoke('overleaf:editMessage', projectId, threadId, messageId, content) as Promise<{ success: boolean }>,
+  overleafDeleteThread: (projectId: string, docId: string, threadId: string) =>
+    ipcRenderer.invoke('overleaf:deleteThread', projectId, docId, threadId) as Promise<{ success: boolean }>,
+  overleafAddComment: (projectId: string, docId: string, pos: number, text: string, content: string) =>
+    ipcRenderer.invoke('overleaf:addComment', projectId, docId, pos, text, content) as Promise<{ success: boolean; threadId?: string; message?: string }>,
+
+  // OT / Socket mode
+  otConnect: (projectId: string) =>
+    ipcRenderer.invoke('ot:connect', projectId) as Promise<{
+      success: boolean
+      files?: unknown[]
+      project?: { name: string; rootDocId: string }
+      docPathMap?: Record<string, string>
+      pathDocMap?: Record<string, string>
+      fileRefs?: Array<{ id: string; path: string }>
+      rootFolderId?: string
+      message?: string
+    }>,
+  otDisconnect: () => ipcRenderer.invoke('ot:disconnect'),
+  otJoinDoc: (docId: string) =>
+    ipcRenderer.invoke('ot:joinDoc', docId) as Promise<{
+      success: boolean
+      content?: string
+      version?: number
+      ranges?: { comments: Array<{ id: string; op: { c: string; p: number; t: string } }>; changes: unknown[] }
+      message?: string
+    }>,
+  otLeaveDoc: (docId: string) => ipcRenderer.invoke('ot:leaveDoc', docId),
+  otSendOp: (docId: string, ops: unknown[], version: number, hash: string) =>
+    ipcRenderer.invoke('ot:sendOp', docId, ops, version, hash),
+  otFetchAllCommentContexts: () =>
+    ipcRenderer.invoke('ot:fetchAllCommentContexts') as Promise<{
+      success: boolean
+      contexts?: Record<string, { file: string; text: string; pos: number }>
+    }>,
+  onOtRemoteOp: (cb: (data: { docId: string; ops: unknown[]; version: number }) => void) => {
+    const handler = (_e: Electron.IpcRendererEvent, data: { docId: string; ops: unknown[]; version: number }) => cb(data)
+    ipcRenderer.on('ot:remoteOp', handler)
+    return () => ipcRenderer.removeListener('ot:remoteOp', handler)
+  },
+  onOtAck: (cb: (data: { docId: string }) => void) => {
+    const handler = (_e: Electron.IpcRendererEvent, data: { docId: string }) => cb(data)
+    ipcRenderer.on('ot:ack', handler)
+    return () => ipcRenderer.removeListener('ot:ack', handler)
+  },
+  onOtConnectionState: (cb: (state: string) => void) => {
+    const handler = (_e: Electron.IpcRendererEvent, state: string) => cb(state)
+    ipcRenderer.on('ot:connectionState', handler)
+    return () => ipcRenderer.removeListener('ot:connectionState', handler)
+  },
+  onOtDocRejoined: (cb: (data: { docId: string; content: string; version: number }) => void) => {
+    const handler = (_e: Electron.IpcRendererEvent, data: { docId: string; content: string; version: number }) => cb(data)
+    ipcRenderer.on('ot:docRejoined', handler)
+    return () => ipcRenderer.removeListener('ot:docRejoined', handler)
+  },
+  overleafListProjects: () =>
+    ipcRenderer.invoke('overleaf:listProjects') as Promise<{
+      success: boolean
+      projects?: Array<{
+        id: string; name: string; lastUpdated: string
+        owner?: { firstName: string; lastName: string; email?: string }
+        lastUpdatedBy?: { firstName: string; lastName: string } | null
+        accessLevel?: string; source?: string
+      }>
+      message?: string
+    }>,
+  overleafCreateProject: (name: string) =>
+    ipcRenderer.invoke('overleaf:createProject', name) as Promise<{
+      success: boolean; projectId?: string; message?: string
+    }>,
+  overleafUploadProject: () =>
+    ipcRenderer.invoke('overleaf:uploadProject') as Promise<{
+      success: boolean; projectId?: string; message?: string
+    }>,
+  overleafSocketCompile: (mainTexRelPath: string) =>
+    ipcRenderer.invoke('overleaf:socketCompile', mainTexRelPath) as Promise<{
+      success: boolean; log: string; pdfPath: string
+    }>,
+  overleafRenameEntity: (projectId: string, entityType: string, entityId: string, newName: string) =>
+    ipcRenderer.invoke('overleaf:renameEntity', projectId, entityType, entityId, newName) as Promise<{ success: boolean; message?: string }>,
+  overleafDeleteEntity: (projectId: string, entityType: string, entityId: string) =>
+    ipcRenderer.invoke('overleaf:deleteEntity', projectId, entityType, entityId) as Promise<{ success: boolean; message?: string }>,
+  overleafCreateDoc: (projectId: string, parentFolderId: string, name: string) =>
+    ipcRenderer.invoke('overleaf:createDoc', projectId, parentFolderId, name) as Promise<{ success: boolean; data?: unknown; message?: string }>,
+  overleafCreateFolder: (projectId: string, parentFolderId: string, name: string) =>
+    ipcRenderer.invoke('overleaf:createFolder', projectId, parentFolderId, name) as Promise<{ success: boolean; data?: unknown; message?: string }>,
+  sha1: (text: string): string => createHash('sha1').update(text).digest('hex'),
+
+  // File sync bridge
+  onSyncExternalEdit: (cb: (data: { docId: string; content: string }) => void) => {
+    const handler = (_e: Electron.IpcRendererEvent, data: { docId: string; content: string }) => cb(data)
+    ipcRenderer.on('sync:externalEdit', handler)
+    return () => ipcRenderer.removeListener('sync:externalEdit', handler)
+  },
+  syncContentChanged: (docId: string, content: string) =>
+    ipcRenderer.invoke('sync:contentChanged', docId, content),
 
   // Shell
   openExternal: (url: string) => ipcRenderer.invoke('shell:openExternal', url),
