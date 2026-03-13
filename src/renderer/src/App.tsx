@@ -291,19 +291,14 @@ export default function App() {
           <div className="welcome-content">
             <div className="welcome-logo">
               <svg viewBox="0 0 512 512" width="96" height="96">
-                <defs>
-                  <linearGradient id="wcG" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="#FFF8E7"/><stop offset="100%" stopColor="#EDE5CE"/></linearGradient>
-                  <linearGradient id="wcC" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="#A0782C"/><stop offset="100%" stopColor="#7A5A1E"/></linearGradient>
-                </defs>
-                <circle cx="256" cy="256" r="240" fill="#6B5B3E"/>
-                <path d="M130 190 Q124 390 185 405 L327 405 Q388 390 382 190 Z" fill="url(#wcG)"/>
-                <ellipse cx="256" cy="190" rx="126" ry="36" fill="url(#wcC)"/>
-                <path d="M256 175 Q240 165 232 172 Q224 180 236 192 L256 208 L276 192 Q288 180 280 172 Q272 165 256 175Z" fill="#D4B880" opacity="0.6"/>
-                <ellipse cx="256" cy="190" rx="126" ry="36" fill="none" stroke="#D6CEBC" strokeWidth="3"/>
-                <path d="M382 230 Q435 235 438 300 Q440 365 390 370" fill="none" stroke="#FFF8E7" strokeWidth="12" strokeLinecap="round"/>
-                <path d="M216 148 Q210 118 220 95" fill="none" stroke="#FFF8E7" strokeWidth="5" strokeLinecap="round" opacity="0.5"/>
-                <path d="M256 140 Q250 105 260 80" fill="none" stroke="#FFF8E7" strokeWidth="5" strokeLinecap="round" opacity="0.45"/>
-                <path d="M296 148 Q290 118 300 95" fill="none" stroke="#FFF8E7" strokeWidth="5" strokeLinecap="round" opacity="0.4"/>
+                <rect width="512" height="512" rx="80" fill="#6B5B3E"/>
+                <path d="M148 195 Q142 375 195 395 L317 395 Q370 375 364 195 Z" fill="#FFF8E7" stroke="#EDE5CE" strokeWidth="2"/>
+                <path d="M364 235 Q410 240 412 305 Q414 365 370 370" fill="none" stroke="#FFF8E7" strokeWidth="14" strokeLinecap="round"/>
+                <ellipse cx="256" cy="195" rx="108" ry="30" fill="#4ECDA0"/>
+                <ellipse cx="256" cy="195" rx="108" ry="30" fill="none" stroke="#EDE5CE" strokeWidth="3"/>
+                <path d="M218 128 L224 108 L230 128 L250 134 L230 140 L224 160 L218 140 L198 134 Z" fill="#4ECDA0" opacity="0.9"/>
+                <path d="M268 100 L273 84 L278 100 L294 105 L278 110 L273 126 L268 110 L252 105 Z" fill="#4ECDA0" opacity="0.7"/>
+                <path d="M308 118 L313 102 L318 118 L334 123 L318 128 L313 144 L308 128 L292 123 Z" fill="#4ECDA0" opacity="0.55"/>
               </svg>
             </div>
             <h1>Latte<span className="lattex-x">X</span></h1>

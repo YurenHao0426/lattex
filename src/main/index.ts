@@ -38,6 +38,13 @@ function createWindow(): void {
   }
 }
 
+/** Safely send IPC to renderer — no-op if window is gone */
+function sendToRenderer(channel: string, ...args: unknown[]) {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send(channel, ...args)
+  }
+}
+
 ipcMain.handle('fs:readFile', async (_e, filePath: string) => {
   return readFile(filePath, 'utf-8')
 })
@@ -99,11 +106,11 @@ ipcMain.handle('pty:spawn', async (_e, cwd: string) => {
   })
 
   ptyInstance.onData((data) => {
-    mainWindow?.webContents.send('pty:data', data)
+    sendToRenderer('pty:data', data)
   })
 
   ptyInstance.onExit(() => {
-    mainWindow?.webContents.send('pty:exit')
+    sendToRenderer('pty:exit')
   })
 })
 
@@ -602,7 +609,7 @@ ipcMain.handle('ot:connect', async (_e, projectId: string) => {
 
     // Relay events to renderer
     overleafSock.on('connectionState', (state: string) => {
-      mainWindow?.webContents.send('ot:connectionState', state)
+      sendToRenderer('ot:connectionState', state)
     })
 
     // otUpdateApplied: server acknowledges our op (ack signal for OT client)
@@ -610,13 +617,13 @@ ipcMain.handle('ot:connect', async (_e, projectId: string) => {
       if (name === 'otUpdateApplied') {
         const update = args[0] as { doc?: string; v?: number } | undefined
         if (update?.doc) {
-          mainWindow?.webContents.send('ot:ack', { docId: update.doc })
+          sendToRenderer('ot:ack', { docId: update.doc })
         }
       }
     })
 
     overleafSock.on('docRejoined', (docId: string, result: JoinDocResult) => {
-      mainWindow?.webContents.send('ot:docRejoined', {
+      sendToRenderer('ot:docRejoined', {
         docId,
         content: result.docLines.join('\n'),
         version: result.version
@@ -626,11 +633,11 @@ ipcMain.handle('ot:connect', async (_e, projectId: string) => {
     // Relay collaborator cursor updates to renderer
     overleafSock.on('serverEvent', (name: string, args: unknown[]) => {
       if (name === 'clientTracking.clientUpdated') {
-        mainWindow?.webContents.send('cursor:remoteUpdate', args[0])
+        sendToRenderer('cursor:remoteUpdate', args[0])
       } else if (name === 'clientTracking.clientDisconnected') {
-        mainWindow?.webContents.send('cursor:remoteDisconnected', args[0])
+        sendToRenderer('cursor:remoteDisconnected', args[0])
       } else if (name === 'new-chat-message') {
-        mainWindow?.webContents.send('chat:newMessage', args[0])
+        sendToRenderer('chat:newMessage', args[0])
       }
     })
 
@@ -705,7 +712,7 @@ ipcMain.handle('ot:joinDoc', async (_e, docId: string) => {
       if (name === 'otUpdateApplied') {
         const update = args[0] as { doc?: string; op?: unknown[]; v?: number } | undefined
         if (update?.doc === docId && update.op) {
-          mainWindow?.webContents.send('ot:remoteOp', {
+          sendToRenderer('ot:remoteOp', {
             docId: update.doc,
             ops: update.op,
             version: update.v
@@ -1000,7 +1007,7 @@ ipcMain.handle('overleaf:socketCompile', async (_e, mainTexRelPath: string) => {
   await compilationManager.syncBinaries(fileRefs)
 
   return compilationManager.compile(mainTexRelPath, (data) => {
-    mainWindow?.webContents.send('latex:log', data)
+    sendToRenderer('latex:log', data)
   })
 })
 
@@ -1023,6 +1030,7 @@ app.whenReady().then(async () => {
 })
 
 app.on('window-all-closed', () => {
+  mainWindow = null
   ptyInstance?.kill()
   fileSyncBridge?.stop()
   fileSyncBridge = null

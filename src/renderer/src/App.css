@@ -102,7 +102,7 @@ html, body, #root {
 .lattex-x {
   font-weight: 800;
   font-style: italic;
-  color: var(--accent-blue);
+  color: #4ECDA0;
 }
 
 .welcome-content p {

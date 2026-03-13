@@ -6,7 +6,27 @@ directories:
 files:
   - out/**/*
   - "!node_modules/**/*"
+  - node_modules/node-pty/**/*
+  - node_modules/ws/**/*
+  - node_modules/chokidar/**/*
+  - node_modules/diff-match-patch/**/*
+  - node_modules/anymatch/**/*
+  - node_modules/braces/**/*
+  - node_modules/fill-range/**/*
+  - node_modules/glob-parent/**/*
+  - node_modules/is-binary-path/**/*
+  - node_modules/is-extglob/**/*
+  - node_modules/is-glob/**/*
+  - node_modules/is-number/**/*
+  - node_modules/normalize-path/**/*
+  - node_modules/picomatch/**/*
+  - node_modules/readdirp/**/*
+  - node_modules/to-regex-range/**/*
+  - node_modules/binary-extensions/**/*
+asarUnpack:
+  - node_modules/node-pty/**/*
 mac:
+  icon: resources/icon.icns
   target:
     - dmg
   category: public.app-category.productivity
