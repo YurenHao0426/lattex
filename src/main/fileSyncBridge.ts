@@ -123,9 +123,14 @@ export class FileSyncBridge {
     this.socket.on('serverEvent', this.serverEventHandler)
 
     // Start watching the temp dir
+    // usePolling: FSEvents is unreliable in macOS temp dirs (/var/folders/...)
+    // atomic: Claude Code and other editors use atomic writes (write temp + rename)
+    //         which macOS FSEvents doesn't detect as 'change' by default
     this.watcher = chokidar.watch(this.tmpDir, {
       ignoreInitial: true,
-      awaitWriteFinish: { stabilityThreshold: 100, pollInterval: 50 },
+      usePolling: true,
+      interval: 500,
+      atomic: true,
       ignored: [
         /(^|[/\\])\../, // dotfiles
         /\.(aux|log|fls|fdb_latexmk|synctex\.gz|bbl|blg|out|toc|lof|lot|nav|snm|vrb)$/ // LaTeX output files (not pdf!)
