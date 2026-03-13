@@ -3,7 +3,8 @@
 
 // Per-document orchestrator: ties CM6 adapter to OT client, IPC bridge
 import type { EditorView } from '@codemirror/view'
-import { ChangeSet, Transaction, type Text } from '@codemirror/state'
+import { ChangeSet, Transaction, type ChangeSpec, type Text } from '@codemirror/state'
+import { diff_match_patch } from 'diff-match-patch'
 import { OtClient } from './otClient'
 import type { OtOp } from './types'
 import { changeSetToOtOps, otOpsToChangeSpec } from './cmAdapter'
@@ -136,10 +137,27 @@ export class OverleafDocSync {
     const currentContent = this.view.state.doc.toString()
     if (currentContent === newContent) return
 
-    // Dispatch as a local change (NOT remote annotation) so it flows through OT
-    this.view.dispatch({
-      changes: { from: 0, to: this.view.state.doc.length, insert: newContent }
-    })
+    // Use diff to compute minimal changes so comment range positions remap correctly
+    const dmp = new diff_match_patch()
+    const diffs = dmp.diff_main(currentContent, newContent)
+    dmp.diff_cleanupEfficiency(diffs)
+
+    const changes: ChangeSpec[] = []
+    let pos = 0
+    for (const [type, text] of diffs) {
+      if (type === 0) { // EQUAL
+        pos += text.length
+      } else if (type === -1) { // DELETE
+        changes.push({ from: pos, to: pos + text.length })
+        pos += text.length
+      } else if (type === 1) { // INSERT
+        changes.push({ from: pos, to: pos, insert: text })
+      }
+    }
+
+    if (changes.length > 0) {
+      this.view.dispatch({ changes })
+    }
   }
 
   destroy() {

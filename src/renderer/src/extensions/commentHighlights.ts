@@ -220,7 +220,6 @@ const commentHighlightTheme = EditorView.baseTheme({
     backgroundColor: 'rgba(243, 177, 17, 0.25)',
     borderBottom: '2px solid rgba(243, 177, 17, 0.5)',
     padding: '1px 0',
-    cursor: 'pointer',
   },
   '.cm-comment-highlight-hover': {
     backgroundColor: 'rgba(243, 177, 17, 0.45)',

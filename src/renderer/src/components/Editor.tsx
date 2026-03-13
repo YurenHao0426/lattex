@@ -32,9 +32,10 @@ const cosmicLatteTheme = EditorView.theme({
     color: '#3B3228', padding: '8px 0'
   },
   '.cm-cursor': { borderLeftColor: '#3B3228' },
-  '.cm-activeLine': { backgroundColor: '#F5EDD6' },
-  '.cm-activeLineGutter': { backgroundColor: '#F5EDD6' },
-  '.cm-selectionBackground, ::selection': { backgroundColor: '#B8D4E3 !important' },
+  '.cm-activeLine': { backgroundColor: 'rgba(214, 206, 188, 0.3)' },
+  '.cm-activeLineGutter': { backgroundColor: 'rgba(214, 206, 188, 0.3)' },
+  '.cm-selectionBackground, ::selection': { backgroundColor: 'rgba(120, 170, 210, 0.45) !important' },
+  '&.cm-focused .cm-selectionBackground': { backgroundColor: 'rgba(120, 170, 210, 0.45) !important' },
   '.cm-gutters': {
     backgroundColor: '#F5EDD6', color: '#A09880', border: 'none',
     borderRight: '1px solid #D6CEBC', paddingRight: '8px'

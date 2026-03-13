@@ -90,6 +90,8 @@ interface AppState {
   setFileRefs: (refs: Array<{ id: string; path: string }>) => void
   rootFolderId: string
   setRootFolderId: (id: string) => void
+  syncDir: string
+  setSyncDir: (dir: string) => void
 
   // Review panel
   showReviewPanel: boolean
@@ -198,6 +200,8 @@ export const useAppStore = create<AppState>((set) => ({
   setFileRefs: (refs) => set({ fileRefs: refs }),
   rootFolderId: '',
   setRootFolderId: (id) => set({ rootFolderId: id }),
+  syncDir: '',
+  setSyncDir: (dir) => set({ syncDir: dir }),
 
   showReviewPanel: false,
   toggleReviewPanel: () => set((s) => ({ showReviewPanel: !s.showReviewPanel })),
@@ -240,6 +244,7 @@ export const useAppStore = create<AppState>((set) => ({
     overleafProject: null,
     fileRefs: [],
     rootFolderId: '',
+    syncDir: '',
     commentContexts: {},
     overleafDocs: {},
     hoveredThreadId: null,

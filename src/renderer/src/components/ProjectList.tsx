@@ -65,6 +65,8 @@ export default function ProjectList({ onOpenProject }: Props) {
       if (result.fileRefs) store.setFileRefs(result.fileRefs)
       if (result.rootFolderId) store.setRootFolderId(result.rootFolderId)
       store.setOverleafProjectId(pid)
+      store.setConnectionState('connected')
+      if (result.syncDir) store.setSyncDir(result.syncDir)
       setStatusMessage('Connected')
       onOpenProject(pid)
     } else {

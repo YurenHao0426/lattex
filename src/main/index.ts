@@ -664,7 +664,8 @@ ipcMain.handle('ot:connect', async (_e, projectId: string) => {
       docPathMap,
       pathDocMap,
       fileRefs,
-      rootFolderId
+      rootFolderId,
+      syncDir: tmpDir
     }
   } catch (e) {
     console.log('[ot:connect] error:', e)

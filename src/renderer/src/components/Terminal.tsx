@@ -55,8 +55,9 @@ export default function Terminal() {
     xtermRef.current = xterm
     fitAddonRef.current = fitAddon
 
-    // Spawn shell
-    window.api.ptySpawn('/tmp')
+    // Spawn shell in project sync directory
+    const syncDir = useAppStore.getState().syncDir || '/tmp'
+    window.api.ptySpawn(syncDir)
 
     // Pipe data
     const unsubData = window.api.onPtyData((data) => {
