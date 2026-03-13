@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Yuren Hao
+// Licensed under AGPL-3.0 - see LICENSE file
+
 import { useState, useEffect, useCallback, useRef, Component, type ReactNode } from 'react'
 import { PanelGroup, Panel, PanelResizeHandle } from 'react-resizable-panels'
 import { useAppStore } from './stores/appStore'

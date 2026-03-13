@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Yuren Hao
+// Licensed under AGPL-3.0 - see LICENSE file
+
 // Per-document orchestrator: ties CM6 adapter to OT client, IPC bridge
 import type { EditorView } from '@codemirror/view'
 import { ChangeSet, Transaction, type Text } from '@codemirror/state'

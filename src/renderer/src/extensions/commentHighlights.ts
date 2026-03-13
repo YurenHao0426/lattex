@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Yuren Hao
+// Licensed under AGPL-3.0 - see LICENSE file
+
 /**
  * CodeMirror extension for highlighting commented text ranges.
  * Inspired by Overleaf's ranges.ts — renders Decoration.mark for each comment

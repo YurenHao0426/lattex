@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Yuren Hao
+// Licensed under AGPL-3.0 - see LICENSE file
+
 // Bidirectional conversion: CM6 ChangeSet <-> Overleaf OT ops
 import type { ChangeSet, Text, ChangeSpec } from '@codemirror/state'
 import type { OtOp, InsertOp, DeleteOp } from './types'

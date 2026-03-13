@@ -2,6 +2,8 @@
   "name": "lattex",
   "version": "0.1.0",
   "description": "LaTeX editor with real-time Overleaf sync",
+  "license": "AGPL-3.0",
+  "author": "Yuren Hao",
   "main": "./out/main/index.js",
   "scripts": {
     "dev": "electron-vite dev",

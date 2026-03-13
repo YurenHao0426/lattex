@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Yuren Hao
+// Licensed under AGPL-3.0 - see LICENSE file
+
 import { resolve } from 'path'
 import { defineConfig, externalizeDepsPlugin } from 'electron-vite'
 import react from '@vitejs/plugin-react'

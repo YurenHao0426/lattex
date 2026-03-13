@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Yuren Hao
+// Licensed under AGPL-3.0 - see LICENSE file
+
 // Persistent Socket.IO v0.9 client for real-time Overleaf collaboration
 import { EventEmitter } from 'events'
 import WebSocket from 'ws'

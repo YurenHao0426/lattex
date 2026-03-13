@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Yuren Hao
+// Licensed under AGPL-3.0 - see LICENSE file
+
 import { useState, useEffect, useCallback, useMemo } from 'react'
 import { useAppStore } from '../stores/appStore'
 

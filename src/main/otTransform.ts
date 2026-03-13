@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Yuren Hao
+// Licensed under AGPL-3.0 - see LICENSE file
+
 // OT transform functions for main process (mirror of renderer transform)
 import type { OtOp } from './otTypes'
 import { isInsert, isDelete, isComment } from './otTypes'

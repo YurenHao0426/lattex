@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Yuren Hao
+// Licensed under AGPL-3.0 - see LICENSE file
+
 // Static LaTeX environment names for \begin{} completion
 // Each entry: [name, detail, snippet body (optional)]
 

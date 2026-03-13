@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Yuren Hao
+// Licensed under AGPL-3.0 - see LICENSE file
+
 // OT state machine for main process (mirror of renderer otClient)
 import type { OtOp } from './otTypes'
 import { transformOps } from './otTransform'

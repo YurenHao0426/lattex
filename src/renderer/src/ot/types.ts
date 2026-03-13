@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Yuren Hao
+// Licensed under AGPL-3.0 - see LICENSE file
+
 // OT type definitions for Overleaf's text operation format
 
 /** Insert text at position p */

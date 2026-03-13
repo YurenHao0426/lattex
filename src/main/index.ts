@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Yuren Hao
+// Licensed under AGPL-3.0 - see LICENSE file
+
 import { app, BrowserWindow, ipcMain, dialog, shell, net } from 'electron'
 import { join, basename } from 'path'
 import { readFile, writeFile } from 'fs/promises'

@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Yuren Hao
+// Licensed under AGPL-3.0 - see LICENSE file
+
 // Bidirectional file sync bridge: temp dir ↔ Overleaf via OT
 import { join } from 'path'
 import { readFile, writeFile, mkdir } from 'fs/promises'

@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Yuren Hao
+// Licensed under AGPL-3.0 - see LICENSE file
+
 // Static LaTeX command/snippet completions
 // Each entry: [command, snippet (with $1 tab stops), detail]
 // Snippet syntax: $1, $2 etc are tab stops, ${1:placeholder} has default text

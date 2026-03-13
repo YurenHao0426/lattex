@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Yuren Hao
+// Licensed under AGPL-3.0 - see LICENSE file
+
 // Manages temp directory for Overleaf socket-mode compilation
 import { join, basename } from 'path'
 import { writeFile, mkdir, rm } from 'fs/promises'

@@ -1,3 +1,6 @@
+// Copyright (c) 2026 Yuren Hao
+// Licensed under AGPL-3.0 - see LICENSE file
+
 /**
  * CodeMirror extension: "Add comment" tooltip on text selection.
  * Inspired by Overleaf's review-tooltip.ts.
