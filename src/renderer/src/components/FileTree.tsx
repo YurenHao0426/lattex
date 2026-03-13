@@ -263,6 +263,51 @@ export default function FileTree() {
     closeMenu()
   }
 
+  const [dragOver, setDragOver] = useState(false)
+
+  const handleDragOver = useCallback((e: React.DragEvent) => {
+    e.preventDefault()
+    e.stopPropagation()
+    setDragOver(true)
+  }, [])
+
+  const handleDragLeave = useCallback((e: React.DragEvent) => {
+    e.preventDefault()
+    e.stopPropagation()
+    setDragOver(false)
+  }, [])
+
+  const handleDrop = useCallback(async (e: React.DragEvent) => {
+    e.preventDefault()
+    e.stopPropagation()
+    setDragOver(false)
+
+    const projectId = useAppStore.getState().overleafProjectId
+    const folderId = useAppStore.getState().rootFolderId
+    if (!projectId || !folderId) return
+
+    const droppedFiles = e.dataTransfer.files
+    if (droppedFiles.length === 0) return
+
+    for (let i = 0; i < droppedFiles.length; i++) {
+      const file = droppedFiles[i]
+      const filePath = window.api.getPathForFile(file)
+      const fileName = file.name
+
+      useAppStore.getState().setStatusMessage(`Uploading ${fileName}...`)
+      const result = await window.api.uploadFileToProject(projectId, folderId, filePath, fileName)
+      if (result.success) {
+        useAppStore.getState().setStatusMessage(`Uploaded ${fileName}`)
+      } else {
+        useAppStore.getState().setStatusMessage(`Upload failed: ${result.message}`)
+        return
+      }
+    }
+
+    // Refresh file tree
+    await reconnectProject(projectId)
+  }, [])
+
   const handleOpenInOverleaf = () => {
     const projectId = useAppStore.getState().overleafProjectId
     if (projectId) {
@@ -272,7 +317,12 @@ export default function FileTree() {
   }
 
   return (
-    <div className="file-tree">
+    <div
+      className={`file-tree${dragOver ? ' file-tree-dragover' : ''}`}
+      onDragOver={handleDragOver}
+      onDragLeave={handleDragLeave}
+      onDrop={handleDrop}
+    >
       <div className="file-tree-header">
         <span>FILES</span>
       </div>

@@ -30,6 +30,8 @@ export default function ProjectList({ onOpenProject }: Props) {
   const [busyText, setBusyText] = useState('')
   const [sortBy, setSortBy] = useState<SortKey>('lastUpdated')
   const [sortOrder, setSortOrder] = useState<SortOrder>('desc')
+  const [showNewProject, setShowNewProject] = useState(false)
+  const [newProjectName, setNewProjectName] = useState('Untitled Project')
   const { setStatusMessage } = useAppStore()
 
   const loadProjects = useCallback(async () => {
@@ -76,18 +78,20 @@ export default function ProjectList({ onOpenProject }: Props) {
   }
 
   const handleCreateProject = async () => {
-    const name = prompt('Project name:', 'Untitled Project')
-    if (!name?.trim()) return
+    const name = newProjectName.trim()
+    if (!name) return
 
+    setShowNewProject(false)
     setError('')
     setBusy(true)
     setBusyText('Creating project...')
 
-    const result = await window.api.overleafCreateProject(name.trim())
+    const result = await window.api.overleafCreateProject(name)
     setBusy(false)
 
     if (result.success && result.projectId) {
-      setStatusMessage(`Created "${name.trim()}"`)
+      setStatusMessage(`Created "${name}"`)
+      setNewProjectName('Untitled Project')
       loadProjects()
     } else {
       setError(result.message || 'Failed to create project')
@@ -225,7 +229,7 @@ export default function ProjectList({ onOpenProject }: Props) {
                 placeholder="Search projects..."
                 autoFocus
               />
-              <button className="btn btn-primary btn-sm" onClick={handleCreateProject}>
+              <button className="btn btn-primary btn-sm" onClick={() => setShowNewProject(true)}>
                 New Project
               </button>
               <button className="btn btn-secondary btn-sm" onClick={handleUploadProject}>
@@ -284,6 +288,29 @@ export default function ProjectList({ onOpenProject }: Props) {
           </>
         )}
       </div>
+      {showNewProject && (
+        <div className="modal-overlay" onClick={() => setShowNewProject(false)}>
+          <div className="modal-box" onClick={(e) => e.stopPropagation()}>
+            <h3 style={{ margin: '0 0 12px' }}>New Project</h3>
+            <input
+              type="text"
+              className="projects-search"
+              value={newProjectName}
+              onChange={(e) => setNewProjectName(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') handleCreateProject()
+                if (e.key === 'Escape') setShowNewProject(false)
+              }}
+              autoFocus
+              style={{ width: '100%', marginBottom: 12 }}
+            />
+            <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+              <button className="btn btn-secondary btn-sm" onClick={() => setShowNewProject(false)}>Cancel</button>
+              <button className="btn btn-primary btn-sm" onClick={handleCreateProject}>Create</button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

@@ -4,6 +4,7 @@
 import { app, BrowserWindow, ipcMain, dialog, shell, net } from 'electron'
 import { join, basename } from 'path'
 import { readFile, writeFile } from 'fs/promises'
+import { createReadStream } from 'fs'
 import { spawn } from 'child_process'
 import * as pty from 'node-pty'
 import { OverleafSocket, type RootFolder, type SubFolder, type JoinDocResult } from './overleafSocket'
@@ -840,7 +841,7 @@ ipcMain.handle('overleaf:listProjects', async () => {
 
 ipcMain.handle('overleaf:createProject', async (_e, name: string) => {
   if (!overleafSessionCookie) return { success: false, message: 'not_logged_in' }
-  const result = await overleafFetch('/api/project/new', {
+  const result = await overleafFetch('/project/new', {
     method: 'POST',
     body: JSON.stringify({ projectName: name })
   })
@@ -874,7 +875,7 @@ ipcMain.handle('overleaf:uploadProject', async () => {
   return new Promise((resolve) => {
     const req = net.request({
       method: 'POST',
-      url: 'https://www.overleaf.com/api/project/new/upload'
+      url: 'https://www.overleaf.com/project/new/upload'
     })
     req.setHeader('Cookie', overleafSessionCookie)
     req.setHeader('Content-Type', `multipart/form-data; boundary=${boundary}`)
@@ -938,6 +939,78 @@ ipcMain.handle('overleaf:createFolder', async (_e, projectId: string, parentFold
     body: JSON.stringify({ name, parent_folder_id: parentFolderId })
   })
   return { success: result.ok, data: result.data, message: result.ok ? '' : `HTTP ${result.status}` }
+})
+
+// ── Upload file to project (binary or text) ───────────────────
+ipcMain.handle('project:uploadFile', async (_e, projectId: string, folderId: string, filePath: string, fileName: string) => {
+  if (!overleafSessionCookie) return { success: false, message: 'not_logged_in' }
+
+  try {
+    const fileData = await readFile(filePath)
+    const ext = fileName.split('.').pop()?.toLowerCase() || ''
+    const mimeMap: Record<string, string> = {
+      png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif',
+      svg: 'image/svg+xml', pdf: 'application/pdf', eps: 'application/postscript',
+      zip: 'application/zip', bmp: 'image/bmp', tiff: 'image/tiff',
+      tex: 'text/x-tex', bib: 'text/x-bibtex', txt: 'text/plain', csv: 'text/csv',
+      sty: 'text/x-tex', cls: 'text/x-tex', md: 'text/markdown',
+    }
+    const mime = mimeMap[ext] || 'application/octet-stream'
+    const boundary = '----FormBoundary' + Math.random().toString(36).slice(2)
+
+    // Build multipart body matching Overleaf's expected format:
+    // 1. "name" text field (required — server reads filename from req.body.name)
+    // 2. "type" text field
+    // 3. "qqfile" file field (fieldName must be "qqfile" for multer)
+    const parts: Buffer[] = []
+    // name field
+    parts.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="name"\r\n\r\n${fileName}\r\n`))
+    // type field
+    parts.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="type"\r\n\r\n${mime}\r\n`))
+    // qqfile field
+    parts.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="qqfile"; filename="${fileName}"\r\nContent-Type: ${mime}\r\n\r\n`))
+    parts.push(fileData)
+    parts.push(Buffer.from(`\r\n--${boundary}--\r\n`))
+
+    const body = Buffer.concat(parts)
+
+    return new Promise<{ success: boolean; message?: string }>((resolve) => {
+      const req = net.request({
+        method: 'POST',
+        url: `https://www.overleaf.com/project/${projectId}/upload?folder_id=${folderId}`
+      })
+      req.setHeader('Cookie', overleafSessionCookie)
+      req.setHeader('Content-Type', `multipart/form-data; boundary=${boundary}`)
+      req.setHeader('User-Agent', 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36')
+      req.setHeader('Accept', 'application/json')
+      req.setHeader('Referer', `https://www.overleaf.com/project/${projectId}`)
+      req.setHeader('Origin', 'https://www.overleaf.com')
+      if (overleafCsrfToken) req.setHeader('x-csrf-token', overleafCsrfToken)
+
+      let resBody = ''
+      req.on('response', (res) => {
+        res.on('data', (chunk: Buffer) => { resBody += chunk.toString() })
+        res.on('end', () => {
+          console.log('[upload] status:', res.statusCode, 'body:', resBody.slice(0, 300))
+          try {
+            const data = JSON.parse(resBody)
+            if (data.success !== false && !data.error) {
+              resolve({ success: true })
+            } else {
+              resolve({ success: false, message: data.error || 'Upload failed' })
+            }
+          } catch {
+            resolve({ success: false, message: `HTTP ${res.statusCode}: ${resBody.slice(0, 200)}` })
+          }
+        })
+      })
+      req.on('error', (e) => resolve({ success: false, message: String(e) }))
+      req.write(body)
+      req.end()
+    })
+  } catch (e) {
+    return { success: false, message: String(e) }
+  }
 })
 
 // Fetch comment ranges from ALL docs (for ReviewPanel)

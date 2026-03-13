@@ -303,6 +303,11 @@ html, body, #root {
   background: var(--bg-secondary);
   user-select: none;
 }
+.file-tree-dragover {
+  outline: 2px dashed #4ECDA0;
+  outline-offset: -2px;
+  background: rgba(78, 205, 160, 0.08);
+}
 
 .file-tree-header {
   display: flex;

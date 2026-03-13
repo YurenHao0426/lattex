@@ -53,6 +53,17 @@ export default function App() {
 
   const [checkingSession, setCheckingSession] = useState(true)
 
+  // Prevent Electron from navigating to dropped files
+  useEffect(() => {
+    const prevent = (e: DragEvent) => e.preventDefault()
+    document.addEventListener('dragover', prevent)
+    document.addEventListener('drop', prevent)
+    return () => {
+      document.removeEventListener('dragover', prevent)
+      document.removeEventListener('drop', prevent)
+    }
+  }, [])
+
   // Check session on startup
   useEffect(() => {
     window.api.overleafHasWebSession().then(({ loggedIn }) => {

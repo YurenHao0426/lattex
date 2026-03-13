@@ -1,7 +1,7 @@
 // Copyright (c) 2026 Yuren Hao
 // Licensed under AGPL-3.0 - see LICENSE file
 
-import { contextBridge, ipcRenderer } from 'electron'
+import { contextBridge, ipcRenderer, webUtils } from 'electron'
 import { createHash } from 'crypto'
 
 const api = {
@@ -136,6 +136,9 @@ const api = {
     ipcRenderer.invoke('overleaf:createDoc', projectId, parentFolderId, name) as Promise<{ success: boolean; data?: unknown; message?: string }>,
   overleafCreateFolder: (projectId: string, parentFolderId: string, name: string) =>
     ipcRenderer.invoke('overleaf:createFolder', projectId, parentFolderId, name) as Promise<{ success: boolean; data?: unknown; message?: string }>,
+  uploadFileToProject: (projectId: string, folderId: string, filePath: string, fileName: string) =>
+    ipcRenderer.invoke('project:uploadFile', projectId, folderId, filePath, fileName) as Promise<{ success: boolean; message?: string }>,
+  getPathForFile: (file: File) => webUtils.getPathForFile(file),
   sha1: (text: string): string => createHash('sha1').update(text).digest('hex'),
 
   // File sync bridge
