@@ -266,6 +266,21 @@ export default function PdfViewer() {
     }
   }, [pdfPath, scale, tab])
 
+  // Scroll wheel zoom on PDF container
+  useEffect(() => {
+    const container = containerRef.current
+    if (!container) return
+    const handleWheel = (e: WheelEvent) => {
+      if (!(e.ctrlKey || e.metaKey)) return
+      e.preventDefault()
+      // Proportional delta clamped — smooth for trackpad pinch, reasonable for mouse wheel
+      const delta = Math.max(-0.2, Math.min(0.2, -e.deltaY * 0.005))
+      setScale((s) => Math.min(3, Math.max(0.25, +(s + delta).toFixed(2))))
+    }
+    container.addEventListener('wheel', handleWheel, { passive: false })
+    return () => container.removeEventListener('wheel', handleWheel)
+  }, [])
+
   // Attach double-click listener to PDF container
   useEffect(() => {
     const container = containerRef.current

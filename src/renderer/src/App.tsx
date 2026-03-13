@@ -242,6 +242,21 @@ export default function App() {
         }
       }
     }
+
+    // Pre-load .bib files in background for citation autocomplete
+    const st = useAppStore.getState()
+    for (const [docId, relPath] of Object.entries(st.docPathMap)) {
+      if (relPath.endsWith('.bib') && !st.fileContents[relPath]) {
+        window.api.otJoinDoc(docId).then((res) => {
+          if (res.success && res.content !== undefined) {
+            useAppStore.getState().setFileContent(relPath, res.content)
+            if (res.version !== undefined) {
+              useAppStore.getState().setDocVersion(docId, res.version)
+            }
+          }
+        }).catch(() => {})
+      }
+    }
   }
 
   const handleBackToProjects = async () => {
@@ -271,7 +286,24 @@ export default function App() {
         <div className="welcome-screen">
           <div className="welcome-drag-bar" />
           <div className="welcome-content">
-            <h1>ClaudeTeX</h1>
+            <div className="welcome-logo">
+              <svg viewBox="0 0 512 512" width="96" height="96">
+                <defs>
+                  <linearGradient id="wcG" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="#FFF8E7"/><stop offset="100%" stopColor="#EDE5CE"/></linearGradient>
+                  <linearGradient id="wcC" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="#A0782C"/><stop offset="100%" stopColor="#7A5A1E"/></linearGradient>
+                </defs>
+                <circle cx="256" cy="256" r="240" fill="#6B5B3E"/>
+                <path d="M130 190 Q124 390 185 405 L327 405 Q388 390 382 190 Z" fill="url(#wcG)"/>
+                <ellipse cx="256" cy="190" rx="126" ry="36" fill="url(#wcC)"/>
+                <path d="M256 175 Q240 165 232 172 Q224 180 236 192 L256 208 L276 192 Q288 180 280 172 Q272 165 256 175Z" fill="#D4B880" opacity="0.6"/>
+                <ellipse cx="256" cy="190" rx="126" ry="36" fill="none" stroke="#D6CEBC" strokeWidth="3"/>
+                <path d="M382 230 Q435 235 438 300 Q440 365 390 370" fill="none" stroke="#FFF8E7" strokeWidth="12" strokeLinecap="round"/>
+                <path d="M216 148 Q210 118 220 95" fill="none" stroke="#FFF8E7" strokeWidth="5" strokeLinecap="round" opacity="0.5"/>
+                <path d="M256 140 Q250 105 260 80" fill="none" stroke="#FFF8E7" strokeWidth="5" strokeLinecap="round" opacity="0.45"/>
+                <path d="M296 148 Q290 118 300 95" fill="none" stroke="#FFF8E7" strokeWidth="5" strokeLinecap="round" opacity="0.4"/>
+              </svg>
+            </div>
+            <h1>Latte<span className="lattex-x">X</span></h1>
             <p>LaTeX editor with real-time Overleaf sync</p>
             <button className="btn btn-primary btn-large" onClick={handleLogin}>
               Sign in to Overleaf

@@ -1,5 +1,5 @@
-appId: com.claudetex.app
-productName: ClaudeTeX
+appId: com.lattex.app
+productName: LatteX
 directories:
   buildResources: resources
   output: dist

@@ -3,7 +3,7 @@ import { EditorView, keymap, lineNumbers, highlightActiveLine, highlightActiveLi
 import { EditorState } from '@codemirror/state'
 import { defaultKeymap, history, historyKeymap, indentWithTab } from '@codemirror/commands'
 import { bracketMatching, foldGutter, indentOnInput, StreamLanguage } from '@codemirror/language'
-import { closeBrackets, closeBracketsKeymap } from '@codemirror/autocomplete'
+import { closeBrackets, closeBracketsKeymap, completionKeymap } from '@codemirror/autocomplete'
 import { searchKeymap, highlightSelectionMatches } from '@codemirror/search'
 import { stex } from '@codemirror/legacy-modes/mode/stex'
 import { useAppStore } from '../stores/appStore'
@@ -17,6 +17,7 @@ import {
 import { addCommentTooltip, setAddCommentCallback } from '../extensions/addCommentTooltip'
 import { otSyncExtension, remoteUpdateAnnotation } from '../extensions/otSyncExtension'
 import { remoteCursorsExtension, setRemoteCursorsEffect, type RemoteCursor } from '../extensions/remoteCursors'
+import { latexAutocomplete } from '../extensions/latexAutocomplete'
 import { OverleafDocSync } from '../ot/overleafSync'
 import { activeDocSyncs, remoteCursors } from '../App'
 
@@ -213,12 +214,14 @@ export default function Editor() {
           ...defaultKeymap,
           ...historyKeymap,
           ...closeBracketsKeymap,
+          ...completionKeymap,
           ...searchKeymap,
           indentWithTab
         ]),
         cosmicLatteTheme,
         updateListener,
         EditorView.lineWrapping,
+        latexAutocomplete(),
         commentHighlights(),
         overleafProjectId ? addCommentTooltip() : [],
         ...otExt,

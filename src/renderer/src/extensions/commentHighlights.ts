@@ -48,6 +48,15 @@ export const commentRangesField = StateField.define<CommentRange[]>({
         return effect.value
       }
     }
+    // Remap positions through document changes so they stay in sync
+    if (tr.docChanged && ranges.length > 0) {
+      const docLen = tr.newDoc.length
+      return ranges.map(r => {
+        const from = Math.min(tr.changes.mapPos(r.from, 1), docLen)
+        const to = Math.min(tr.changes.mapPos(r.to, -1), docLen)
+        return { ...r, from, to }
+      }).filter(r => r.from < r.to)
+    }
     return ranges
   },
 })
@@ -84,17 +93,19 @@ const focusedThreadField = StateField.define<string | null>({
 
 // ── Decoration Builders ────────────────────────────────────────
 
-function buildCommentDecorations(ranges: CommentRange[]): DecorationSet {
+function buildCommentDecorations(ranges: CommentRange[], docLen?: number): DecorationSet {
   if (ranges.length === 0) return Decoration.none
 
   const decorations = []
   for (const r of ranges) {
-    if (r.from >= r.to) continue
+    const from = docLen !== undefined ? Math.min(r.from, docLen) : r.from
+    const to = docLen !== undefined ? Math.min(r.to, docLen) : r.to
+    if (from >= to || from < 0) continue
     decorations.push(
       Decoration.mark({
         class: 'cm-comment-highlight',
         attributes: { 'data-thread-id': r.threadId },
-      }).range(r.from, r.to)
+      }).range(from, to)
     )
   }
   // Must be sorted by from position
@@ -102,21 +113,27 @@ function buildCommentDecorations(ranges: CommentRange[]): DecorationSet {
   return Decoration.set(decorations, true)
 }
 
-function buildHighlightDecoration(ranges: CommentRange[], threadId: string | null): DecorationSet {
+function buildHighlightDecoration(ranges: CommentRange[], threadId: string | null, docLen?: number): DecorationSet {
   if (!threadId) return Decoration.none
   const r = ranges.find(c => c.threadId === threadId)
-  if (!r || r.from >= r.to) return Decoration.none
+  if (!r) return Decoration.none
+  const from = docLen !== undefined ? Math.min(r.from, docLen) : r.from
+  const to = docLen !== undefined ? Math.min(r.to, docLen) : r.to
+  if (from >= to || from < 0) return Decoration.none
   return Decoration.set([
-    Decoration.mark({ class: 'cm-comment-highlight-hover' }).range(r.from, r.to)
+    Decoration.mark({ class: 'cm-comment-highlight-hover' }).range(from, to)
   ])
 }
 
-function buildFocusDecoration(ranges: CommentRange[], threadId: string | null): DecorationSet {
+function buildFocusDecoration(ranges: CommentRange[], threadId: string | null, docLen?: number): DecorationSet {
   if (!threadId) return Decoration.none
   const r = ranges.find(c => c.threadId === threadId)
-  if (!r || r.from >= r.to) return Decoration.none
+  if (!r) return Decoration.none
+  const from = docLen !== undefined ? Math.min(r.from, docLen) : r.from
+  const to = docLen !== undefined ? Math.min(r.to, docLen) : r.to
+  if (from >= to || from < 0) return Decoration.none
   return Decoration.set([
-    Decoration.mark({ class: 'cm-comment-highlight-focus' }).range(r.from, r.to)
+    Decoration.mark({ class: 'cm-comment-highlight-focus' }).range(from, to)
   ])
 }
 
@@ -131,7 +148,7 @@ const commentDecorationsPlugin = ViewPlugin.define<PluginValue & { decorations: 
         this.decorations = this.decorations.map(tr.changes)
         for (const effect of tr.effects) {
           if (effect.is(setCommentRangesEffect)) {
-            this.decorations = buildCommentDecorations(effect.value)
+            this.decorations = buildCommentDecorations(effect.value, update.state.doc.length)
           }
         }
       }
@@ -142,7 +159,7 @@ const commentDecorationsPlugin = ViewPlugin.define<PluginValue & { decorations: 
 
 /** Hover highlight decoration (stronger yellow, from ReviewPanel hover) */
 const hoverHighlightPlugin = ViewPlugin.define<PluginValue & { decorations: DecorationSet }>(
-  (view) => ({
+  () => ({
     decorations: Decoration.none,
     update(update) {
       for (const tr of update.transactions) {
@@ -150,7 +167,7 @@ const hoverHighlightPlugin = ViewPlugin.define<PluginValue & { decorations: Deco
           if (effect.is(highlightThreadEffect) || effect.is(setCommentRangesEffect)) {
             const ranges = update.state.field(commentRangesField)
             const threadId = update.state.field(highlightedThreadField)
-            this.decorations = buildHighlightDecoration(ranges, threadId)
+            this.decorations = buildHighlightDecoration(ranges, threadId, update.state.doc.length)
             return
           }
         }
@@ -187,7 +204,7 @@ const focusHighlightPlugin = ViewPlugin.define<PluginValue & { decorations: Deco
         }
       }
 
-      this.decorations = buildFocusDecoration(ranges, foundThreadId)
+      this.decorations = buildFocusDecoration(ranges, foundThreadId, update.state.doc.length)
     },
   }),
   { decorations: (v) => v.decorations }

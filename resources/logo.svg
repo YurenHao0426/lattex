@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <defs>
+    <linearGradient id="cupGrad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#FFF8E7"/>
+      <stop offset="100%" stop-color="#EDE5CE"/>
+    </linearGradient>
+    <linearGradient id="coffeeGrad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#A0782C"/>
+      <stop offset="100%" stop-color="#7A5A1E"/>
+    </linearGradient>
+  </defs>
+  <!-- Background circle -->
+  <circle cx="256" cy="256" r="240" fill="#6B5B3E"/>
+  <!-- Cup body -->
+  <path d="M130 190 Q124 390 185 405 L327 405 Q388 390 382 190 Z" fill="url(#cupGrad)" stroke="#D6CEBC" stroke-width="2"/>
+  <!-- Coffee surface -->
+  <ellipse cx="256" cy="190" rx="126" ry="36" fill="url(#coffeeGrad)"/>
+  <!-- Latte art - heart -->
+  <path d="M256 175 Q240 165 232 172 Q224 180 236 192 L256 208 L276 192 Q288 180 280 172 Q272 165 256 175Z" fill="#D4B880" opacity="0.6"/>
+  <!-- Cup rim highlight -->
+  <ellipse cx="256" cy="190" rx="126" ry="36" fill="none" stroke="#D6CEBC" stroke-width="3"/>
+  <!-- Handle -->
+  <path d="M382 230 Q435 235 438 300 Q440 365 390 370" fill="none" stroke="#FFF8E7" stroke-width="12" stroke-linecap="round"/>
+  <!-- Steam lines -->
+  <path d="M216 148 Q210 118 220 95" fill="none" stroke="#FFF8E7" stroke-width="5" stroke-linecap="round" opacity="0.5"/>
+  <path d="M256 140 Q250 105 260 80" fill="none" stroke="#FFF8E7" stroke-width="5" stroke-linecap="round" opacity="0.45"/>
+  <path d="M296 148 Q290 118 300 95" fill="none" stroke="#FFF8E7" stroke-width="5" stroke-linecap="round" opacity="0.4"/>
+</svg>

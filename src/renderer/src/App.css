@@ -83,12 +83,23 @@ html, body, #root {
   text-align: center;
 }
 
+.welcome-logo {
+  margin-bottom: 20px;
+}
+
 .welcome-content h1 {
-  font-size: 48px;
+  font-size: 52px;
   font-weight: 700;
   letter-spacing: -1px;
   margin-bottom: 8px;
   color: var(--accent);
+  font-family: "Georgia", "Times New Roman", serif;
+}
+
+.lattex-x {
+  font-weight: 800;
+  font-style: italic;
+  color: var(--accent-blue);
 }
 
 .welcome-content p {
@@ -767,7 +778,8 @@ html, body, #root {
 .projects-header h1 {
   font-size: 22px;
   font-weight: 700;
-  color: var(--text-primary);
+  color: var(--accent);
+  font-family: "Georgia", "Times New Roman", serif;
 }
 
 .projects-header-actions {
@@ -2038,4 +2050,61 @@ html, body, #root {
 .chat-send-btn:disabled {
   opacity: 0.5;
   cursor: not-allowed;
+}
+
+/* ── Autocomplete ─────────────────────────────────────────────── */
+
+.cm-tooltip-autocomplete {
+  background: var(--bg-primary) !important;
+  border: 1px solid var(--border) !important;
+  border-radius: var(--radius) !important;
+  box-shadow: var(--shadow-md) !important;
+  font-family: var(--font-mono) !important;
+  font-size: 12.5px !important;
+}
+
+.cm-tooltip-autocomplete > ul {
+  max-height: 250px !important;
+}
+
+.cm-tooltip-autocomplete > ul > li {
+  padding: 3px 8px !important;
+  color: var(--text-primary) !important;
+  line-height: 1.5;
+}
+
+.cm-tooltip-autocomplete > ul > li[aria-selected] {
+  background: var(--accent-blue) !important;
+  color: #fff !important;
+}
+
+.cm-tooltip-autocomplete .cm-completionLabel {
+  font-weight: 500;
+}
+
+.cm-tooltip-autocomplete .cm-completionDetail {
+  color: var(--text-muted);
+  font-style: italic;
+  margin-left: 8px;
+  font-size: 11.5px;
+}
+
+.cm-tooltip-autocomplete > ul > li[aria-selected] .cm-completionDetail {
+  color: rgba(255, 255, 255, 0.7);
+}
+
+.cm-tooltip-autocomplete .cm-completionIcon {
+  padding: 0 4px 0 0;
+  opacity: 0.6;
+}
+
+.cm-completionInfo {
+  background: var(--bg-secondary) !important;
+  border: 1px solid var(--border) !important;
+  border-radius: var(--radius) !important;
+  color: var(--text-primary) !important;
+  padding: 6px 10px !important;
+  font-family: var(--font-sans) !important;
+  font-size: 12px !important;
+  max-width: 350px;
 }

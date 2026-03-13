@@ -9,6 +9,15 @@ import {
   encodeHeartbeat
 } from './overleafProtocol'
 
+/** Decode WebSocket-encoded UTF-8 text (reverses server's unescape(encodeURIComponent(text))) */
+function decodeUtf8(text: string): string {
+  try {
+    return decodeURIComponent(escape(text))
+  } catch {
+    return text // already decoded or pure ASCII
+  }
+}
+
 export interface JoinProjectResult {
   publicId: string
   project: {
@@ -252,14 +261,30 @@ export class OverleafSocket extends EventEmitter {
     this.joinedDocs.add(docId)
 
     // Ack response format: [error, docLines, version, updates, ranges, pathname]
-    // First element is error (null = success)
     const err = result[0]
     if (err) throw new Error(`joinDoc failed: ${JSON.stringify(err)}`)
 
-    const docLines = (result[1] as string[]) || []
+    // Server encodes lines + range text via unescape(encodeURIComponent(text))
+    // for safe WebSocket transport. Decode with decodeURIComponent(escape(text)).
+    const rawLines = (result[1] as string[]) || []
+    const docLines = rawLines.map(line => decodeUtf8(line))
     const version = (result[2] as number) || 0
     const updates = (result[3] as unknown[]) || []
-    const ranges = (result[4] || { comments: [], changes: [] }) as JoinDocResult['ranges']
+    const rawRanges = result[4] as JoinDocResult['ranges'] | undefined
+
+    // Decode range text (op.c, op.i, op.d) — positions (op.p) stay as-is
+    const ranges = rawRanges || { comments: [], changes: [] }
+    if (ranges.comments) {
+      for (const c of ranges.comments) {
+        if (c.op?.c) c.op.c = decodeUtf8(c.op.c)
+      }
+    }
+    if (ranges.changes) {
+      for (const ch of ranges.changes as any[]) {
+        if (ch.op?.i) ch.op.i = decodeUtf8(ch.op.i)
+        if (ch.op?.d) ch.op.d = decodeUtf8(ch.op.d)
+      }
+    }
 
     return { docLines, version, updates, ranges }
   }

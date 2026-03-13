@@ -15,7 +15,7 @@ export class CompilationManager {
   constructor(projectId: string, cookie: string) {
     this.projectId = projectId
     this.cookie = cookie
-    this.tmpDir = join(require('os').tmpdir(), `claudetex-${projectId}`)
+    this.tmpDir = join(require('os').tmpdir(), `lattex-${projectId}`)
   }
 
   get dir(): string {

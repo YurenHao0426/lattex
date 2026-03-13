@@ -194,7 +194,7 @@ export default function ProjectList({ onOpenProject }: Props) {
       <div className="projects-drag-bar" />
       <div className="projects-container">
         <div className="projects-header">
-          <h1>ClaudeTeX</h1>
+          <h1>Latte<span className="lattex-x">X</span></h1>
           <div className="projects-header-actions">
             <button className="btn btn-secondary btn-sm" onClick={handleLogout}>
               Sign out

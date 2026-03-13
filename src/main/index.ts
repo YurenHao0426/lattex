@@ -211,9 +211,9 @@ ipcMain.handle('overleaf:webLogin', async () => {
     // Inject a floating back button when navigated away from overleaf.com
     const injectBackButton = () => {
       loginWindow.webContents.executeJavaScript(`
-        if (!document.getElementById('claudetex-back-btn')) {
+        if (!document.getElementById('lattex-back-btn')) {
           const btn = document.createElement('div');
-          btn.id = 'claudetex-back-btn';
+          btn.id = 'lattex-back-btn';
           btn.innerHTML = '← Back';
           btn.style.cssText = 'position:fixed;top:8px;left:8px;z-index:999999;padding:6px 14px;' +
             'background:#333;color:#fff;border-radius:6px;cursor:pointer;font:13px -apple-system,sans-serif;' +
