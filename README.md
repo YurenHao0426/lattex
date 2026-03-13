@@ -5,7 +5,7 @@
 </p>
 
 <p align="center">
-  LaTeX editor with real-time Overleaf sync, themed in Cosmic Latte.
+  LaTeX editor with real-time Overleaf sync, themed in <a href="https://en.wikipedia.org/wiki/Cosmic_latte">Cosmic Latte</a>.
 </p>
 
 ## Features
