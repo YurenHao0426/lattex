@@ -172,17 +172,18 @@ function commandSource(context: CompletionContext): CompletionResult | null {
   if (word.text.length < 2 && !context.explicit) return null
 
   const options: Completion[] = latexCommands.map((cmd) => {
+    const detail = cmd.symbol ? `${cmd.symbol}  ${cmd.detail || ''}` : cmd.detail
     if (cmd.snippet) {
       return snippetCompletion(cmd.snippet, {
         label: cmd.label,
-        detail: cmd.detail,
+        detail,
         type: 'function',
         boost: cmd.section === 'structure' || cmd.section === 'sectioning' ? 2 : 0,
       })
     }
     return {
       label: cmd.label,
-      detail: cmd.detail,
+      detail,
       type: 'function',
     }
   })

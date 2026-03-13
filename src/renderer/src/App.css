@@ -2221,6 +2221,18 @@ html, body, #root {
   font-family: var(--font-mono);
 }
 
+/* ── Math Region Highlighting ─────────────────────────────── */
+
+.cm-math-inline {
+  background: rgba(184, 134, 11, 0.06);
+  border-radius: 2px;
+}
+
+.cm-math-display {
+  background: rgba(184, 134, 11, 0.08);
+  border-radius: 3px;
+}
+
 /* ── Math Preview ──────────────────────────────────────────── */
 
 .cm-math-preview {
@@ -2228,4 +2240,21 @@ html, body, #root {
   border: 1px solid var(--border);
   border-radius: var(--radius);
   box-shadow: var(--shadow-md);
+}
+
+.cm-math-preview .katex {
+  font-size: 1.15em;
+}
+
+.cm-math-preview .katex-display {
+  margin: 0;
+}
+
+/* ── Autocomplete Symbol ─────────────────────────────────── */
+
+.cm-completionDetail .completion-symbol {
+  font-family: "Times New Roman", "STIX Two Math", serif;
+  font-style: normal;
+  font-size: 13px;
+  margin-right: 4px;
 }

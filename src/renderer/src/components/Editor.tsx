@@ -5,10 +5,11 @@ import { useEffect, useRef, useState, useCallback } from 'react'
 import { EditorView, keymap, lineNumbers, highlightActiveLine, highlightActiveLineGutter, drawSelection, rectangularSelection } from '@codemirror/view'
 import { EditorState } from '@codemirror/state'
 import { defaultKeymap, history, historyKeymap, indentWithTab } from '@codemirror/commands'
-import { bracketMatching, foldGutter, indentOnInput, StreamLanguage } from '@codemirror/language'
+import { bracketMatching, foldGutter, indentOnInput, StreamLanguage, syntaxHighlighting, HighlightStyle } from '@codemirror/language'
 import { closeBrackets, closeBracketsKeymap, completionKeymap } from '@codemirror/autocomplete'
 import { searchKeymap, highlightSelectionMatches } from '@codemirror/search'
 import { stex } from '@codemirror/legacy-modes/mode/stex'
+import { tags } from '@lezer/highlight'
 import { useAppStore } from '../stores/appStore'
 import {
   commentHighlights,
@@ -24,6 +25,7 @@ import { latexAutocomplete } from '../extensions/latexAutocomplete'
 import { latexFolding } from '../extensions/latexFolding'
 import { latexClosing } from '../extensions/latexClosing'
 import { mathPreview } from '../extensions/mathPreview'
+import { mathHighlight } from '../extensions/mathHighlight'
 import { OverleafDocSync } from '../ot/overleafSync'
 import { activeDocSyncs, remoteCursors } from '../App'
 
@@ -46,22 +48,29 @@ const cosmicLatteTheme = EditorView.theme({
   '.cm-lineNumbers .cm-gutterElement': { padding: '0 8px' },
   '.cm-foldGutter': { width: '16px' },
   '.cm-matchingBracket': { backgroundColor: '#D4C9A8', outline: 'none' },
-  // LaTeX syntax colors
-  '.cm-keyword': { color: '#8B2252', fontWeight: '600' },  // \commands
-  '.cm-atom': { color: '#B8860B' },        // special symbols
-  '.cm-string': { color: '#5B8A3C' },      // arguments
-  '.cm-comment': { color: '#A09880', fontStyle: 'italic' },
-  '.cm-bracket': { color: '#4A6FA5' },     // { } [ ]
-  '.cm-tag': { color: '#8B2252', fontWeight: '600' },  // \begin \end
-  '.cm-builtin': { color: '#6B5B3E' },
-  '.cm-meta': { color: '#C75643' },        // $ math delimiters
-  '.cm-number': { color: '#B8860B' },
-  // StreamLanguage stex token class overrides
-  '.ͼ5': { color: '#8B2252', fontWeight: '600' },  // keyword
-  '.ͼ6': { color: '#4A6FA5' },                      // bracket/variable
-  '.ͼ7': { color: '#5B8A3C' },                      // string
-  '.ͼ8': { color: '#A09880', fontStyle: 'italic' }, // comment
 }, { dark: false })
+
+const cosmicLatteHighlight = HighlightStyle.define([
+  { tag: tags.keyword, color: '#8B2252', fontWeight: '600' },          // \commands
+  { tag: tags.tagName, color: '#8B2252', fontWeight: '600' },          // \begin \end
+  { tag: tags.atom, color: '#B8860B' },                                 // special symbols
+  { tag: tags.number, color: '#B8860B' },                               // numbers
+  { tag: tags.string, color: '#5B8A3C' },                               // arguments in braces
+  { tag: tags.comment, color: '#A09880', fontStyle: 'italic' },         // % comments
+  { tag: tags.bracket, color: '#4A6FA5' },                              // { } [ ] ( )
+  { tag: tags.paren, color: '#4A6FA5' },
+  { tag: tags.squareBracket, color: '#4A6FA5' },
+  { tag: tags.brace, color: '#4A6FA5' },
+  { tag: tags.meta, color: '#C75643' },                                 // $ math delimiters
+  { tag: tags.standard(tags.name), color: '#6B5B3E' },                  // builtins
+  { tag: tags.variableName, color: '#4A6FA5' },                         // variables
+  { tag: tags.definition(tags.variableName), color: '#6B5B3E' },        // definitions
+  { tag: tags.operator, color: '#8B6B8B' },                             // operators
+  { tag: tags.heading, color: '#8B2252', fontWeight: '700' },           // headings
+  { tag: tags.contentSeparator, color: '#D6CEBC' },                     // horizontal rules
+  { tag: tags.url, color: '#4A6FA5', textDecoration: 'underline' },     // URLs
+  { tag: tags.invalid, color: '#C75643', textDecoration: 'underline' }, // errors
+])
 
 export default function Editor() {
   const editorRef = useRef<HTMLDivElement>(null)
@@ -221,6 +230,7 @@ export default function Editor() {
         history(),
         highlightSelectionMatches(),
         StreamLanguage.define(stex),
+        syntaxHighlighting(cosmicLatteHighlight),
         keymap.of([
           ...defaultKeymap,
           ...historyKeymap,
@@ -236,6 +246,7 @@ export default function Editor() {
         latexFolding(),
         latexClosing(),
         mathPreview(),
+        mathHighlight,
         commentHighlights(),
         overleafProjectId ? addCommentTooltip() : [],
         ...otExt,

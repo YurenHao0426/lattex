@@ -3,14 +3,14 @@
 
 /**
  * CodeMirror 6 extension: hover preview for LaTeX math expressions.
- * Shows a rendered preview tooltip when hovering over $...$ or $$...$$ or \(...\) or \[...\].
+ * Uses KaTeX for beautiful rendered math when hovering over $...$ or $$...$$ or \(...\) or \[...\].
  */
 import { hoverTooltip, type Tooltip } from '@codemirror/view'
+import katex from 'katex'
+import 'katex/dist/katex.min.css'
 
 /** Find the math expression surrounding the given position */
 function findMathAt(docText: string, pos: number): { from: number; to: number; tex: string; display: boolean } | null {
-  // Search for display math first ($$...$$, \[...\])
-  // Then inline math ($...$, \(...\))
   const patterns: Array<{ open: string; close: string; display: boolean }> = [
     { open: '$$', close: '$$', display: true },
     { open: '\\[', close: '\\]', display: true },
@@ -19,7 +19,6 @@ function findMathAt(docText: string, pos: number): { from: number; to: number; t
   ]
 
   for (const { open, close, display } of patterns) {
-    // Search backward for opener
     const searchStart = Math.max(0, pos - 2000)
     const before = docText.slice(searchStart, pos + open.length)
 
@@ -28,7 +27,6 @@ function findMathAt(docText: string, pos: number): { from: number; to: number; t
     while (searchFrom >= 0) {
       const idx = before.lastIndexOf(open, searchFrom)
       if (idx === -1) break
-      // For $$, skip if it's actually a single $ at boundary
       if (open === '$$' && idx > 0 && docText[searchStart + idx - 1] === '$') {
         searchFrom = idx - 1
         continue
@@ -42,7 +40,6 @@ function findMathAt(docText: string, pos: number): { from: number; to: number; t
     }
     if (openIdx === -1 || openIdx > pos) continue
 
-    // Search forward for closer
     const afterStart = openIdx + open.length
     const closeIdx = docText.indexOf(close, Math.max(afterStart, pos - close.length + 1))
     if (closeIdx === -1 || closeIdx < pos - close.length) continue
@@ -51,7 +48,6 @@ function findMathAt(docText: string, pos: number): { from: number; to: number; t
     const contentEnd = closeIdx
     if (contentEnd <= contentStart) continue
 
-    // Check pos is within the math region
     if (pos < openIdx || pos > closeIdx + close.length) continue
 
     const tex = docText.slice(contentStart, contentEnd).trim()
@@ -61,27 +57,6 @@ function findMathAt(docText: string, pos: number): { from: number; to: number; t
   }
 
   return null
-}
-
-/** Render LaTeX to HTML using KaTeX-like approach via CSS */
-function renderMathToHtml(tex: string, display: boolean): string {
-  // Use a simple approach: create an img tag with a data URI from a math rendering service
-  // Or use the browser's MathML support
-  // For simplicity, we'll render using MathML basic support + fallback to raw TeX
-
-  // Try MathML rendering for common patterns, fallback to formatted TeX display
-  const escaped = tex
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-
-  const fontSize = display ? '1.2em' : '1em'
-  return `<div style="font-size: ${fontSize}; font-family: 'Times New Roman', serif; padding: 8px 12px; max-width: 400px; overflow-x: auto; white-space: pre-wrap; line-height: 1.6; color: #3B3228;">
-    <math xmlns="http://www.w3.org/1998/Math/MathML" ${display ? 'display="block"' : ''}>
-      <mrow><mtext>${escaped}</mtext></mrow>
-    </math>
-    <div style="margin-top: 4px; font-family: 'SF Mono', monospace; font-size: 11px; color: #A09880; border-top: 1px solid #E8DFC0; padding-top: 4px;">${display ? '$$' : '$'}${escaped}${display ? '$$' : '$'}</div>
-  </div>`
 }
 
 export function mathPreview() {
@@ -97,7 +72,19 @@ export function mathPreview() {
       create() {
         const dom = document.createElement('div')
         dom.className = 'cm-math-preview'
-        dom.innerHTML = renderMathToHtml(result.tex, result.display)
+        try {
+          const html = katex.renderToString(result.tex, {
+            displayMode: result.display,
+            throwOnError: false,
+            errorColor: '#C75643',
+            trust: true,
+            strict: false,
+            output: 'html',
+          })
+          dom.innerHTML = `<div style="padding: 10px 14px; max-width: 500px; overflow-x: auto;">${html}</div>`
+        } catch {
+          dom.innerHTML = `<div style="padding: 8px 12px; font-family: monospace; font-size: 12px; color: #C75643;">Error rendering: ${result.tex}</div>`
+        }
         return { dom }
       }
     }
