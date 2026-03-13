@@ -11,7 +11,7 @@ import { CompilationManager } from './compilationManager'
 import { FileSyncBridge } from './fileSyncBridge'
 
 let mainWindow: BrowserWindow | null = null
-let ptyInstance: pty.IPty | null = null
+const ptyInstances = new Map<string, pty.IPty>()
 let overleafSock: OverleafSocket | null = null
 let compilationManager: CompilationManager | null = null
 let fileSyncBridge: FileSyncBridge | null = null
@@ -91,13 +91,16 @@ ipcMain.handle('synctex:editFromPdf', async (_e, pdfPath: string, page: number, 
 
 // ── Terminal / PTY ───────────────────────────────────────────────
 
-ipcMain.handle('pty:spawn', async (_e, cwd: string) => {
-  if (ptyInstance) {
-    ptyInstance.kill()
+ipcMain.handle('pty:spawn', async (_e, id: string, cwd: string, cmd?: string, args?: string[]) => {
+  const existing = ptyInstances.get(id)
+  if (existing) {
+    existing.kill()
+    ptyInstances.delete(id)
   }
 
-  const shellPath = process.env.SHELL || '/bin/zsh'
-  ptyInstance = pty.spawn(shellPath, ['-l'], {
+  const shellPath = cmd || process.env.SHELL || '/bin/zsh'
+  const shellArgs = args || ['-l']
+  const instance = pty.spawn(shellPath, shellArgs, {
     name: 'xterm-256color',
     cols: 80,
     rows: 24,
@@ -105,28 +108,37 @@ ipcMain.handle('pty:spawn', async (_e, cwd: string) => {
     env: process.env as Record<string, string>
   })
 
-  ptyInstance.onData((data) => {
-    sendToRenderer('pty:data', data)
+  ptyInstances.set(id, instance)
+
+  instance.onData((data) => {
+    sendToRenderer(`pty:data:${id}`, data)
   })
 
-  ptyInstance.onExit(() => {
-    sendToRenderer('pty:exit')
+  instance.onExit(() => {
+    // Only delete if this is still the current instance (avoid race with re-spawn)
+    if (ptyInstances.get(id) === instance) {
+      sendToRenderer(`pty:exit:${id}`)
+      ptyInstances.delete(id)
+    }
   })
 })
 
-ipcMain.handle('pty:write', async (_e, data: string) => {
-  ptyInstance?.write(data)
+ipcMain.handle('pty:write', async (_e, id: string, data: string) => {
+  ptyInstances.get(id)?.write(data)
 })
 
-ipcMain.handle('pty:resize', async (_e, cols: number, rows: number) => {
+ipcMain.handle('pty:resize', async (_e, id: string, cols: number, rows: number) => {
   try {
-    ptyInstance?.resize(cols, rows)
+    ptyInstances.get(id)?.resize(cols, rows)
   } catch { /* ignore resize errors */ }
 })
 
-ipcMain.handle('pty:kill', async () => {
-  ptyInstance?.kill()
-  ptyInstance = null
+ipcMain.handle('pty:kill', async (_e, id: string) => {
+  const instance = ptyInstances.get(id)
+  if (instance) {
+    instance.kill()
+    ptyInstances.delete(id)
+  }
 })
 
 // ── Overleaf Web Session (for comments) ─────────────────────────

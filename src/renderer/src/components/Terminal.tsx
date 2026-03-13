@@ -1,44 +1,55 @@
 // Copyright (c) 2026 Yuren Hao
 // Licensed under AGPL-3.0 - see LICENSE file
 
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState, useCallback } from 'react'
 import { Terminal as XTerm } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import '@xterm/xterm/css/xterm.css'
 import { useAppStore } from '../stores/appStore'
 
-export default function Terminal() {
+const XTERM_THEME = {
+  background: '#2D2A24',
+  foreground: '#E8DFC0',
+  cursor: '#FFF8E7',
+  selectionBackground: '#5C5040',
+  black: '#2D2A24',
+  red: '#C75643',
+  green: '#5B8A3C',
+  yellow: '#B8860B',
+  blue: '#4A6FA5',
+  magenta: '#8B6B8B',
+  cyan: '#5B8A8A',
+  white: '#E8DFC0',
+  brightBlack: '#6B5B3E',
+  brightRed: '#D46A58',
+  brightGreen: '#6FA050',
+  brightYellow: '#D4A020',
+  brightBlue: '#5E84B8',
+  brightMagenta: '#A080A0',
+  brightCyan: '#6FA0A0',
+  brightWhite: '#FFF8E7'
+}
+
+/** A single xterm + pty instance */
+function TerminalInstance({ id, cwd, cmd, args, visible }: {
+  id: string
+  cwd: string
+  cmd?: string
+  args?: string[]
+  visible: boolean
+}) {
   const termRef = useRef<HTMLDivElement>(null)
   const xtermRef = useRef<XTerm | null>(null)
   const fitAddonRef = useRef<FitAddon | null>(null)
-  const [mode, setMode] = useState<'terminal' | 'claude'>('terminal')
+  const spawnedRef = useRef(false)
+  const initializedRef = useRef(false)
 
   useEffect(() => {
-    if (!termRef.current) return
+    if (!termRef.current || initializedRef.current) return
+    initializedRef.current = true
 
     const xterm = new XTerm({
-      theme: {
-        background: '#2D2A24',
-        foreground: '#E8DFC0',
-        cursor: '#FFF8E7',
-        selectionBackground: '#5C5040',
-        black: '#2D2A24',
-        red: '#C75643',
-        green: '#5B8A3C',
-        yellow: '#B8860B',
-        blue: '#4A6FA5',
-        magenta: '#8B6B8B',
-        cyan: '#5B8A8A',
-        white: '#E8DFC0',
-        brightBlack: '#6B5B3E',
-        brightRed: '#D46A58',
-        brightGreen: '#6FA050',
-        brightYellow: '#D4A020',
-        brightBlue: '#5E84B8',
-        brightMagenta: '#A080A0',
-        brightCyan: '#6FA0A0',
-        brightWhite: '#FFF8E7'
-      },
+      theme: XTERM_THEME,
       fontFamily: '"SF Mono", "Fira Code", "JetBrains Mono", monospace',
       fontSize: 13,
       cursorBlink: true,
@@ -49,58 +60,73 @@ export default function Terminal() {
     xterm.loadAddon(fitAddon)
     xterm.open(termRef.current)
 
-    // Fit after a small delay to ensure container is sized
     setTimeout(() => fitAddon.fit(), 100)
 
     xtermRef.current = xterm
     fitAddonRef.current = fitAddon
 
-    // Spawn shell in project sync directory
-    const syncDir = useAppStore.getState().syncDir || '/tmp'
-    window.api.ptySpawn(syncDir)
+    // Spawn pty
+    window.api.ptySpawn(id, cwd, cmd, args)
+    spawnedRef.current = true
 
-    // Pipe data
-    const unsubData = window.api.onPtyData((data) => {
+    const unsubData = window.api.onPtyData(id, (data) => {
       xterm.write(data)
     })
 
-    const unsubExit = window.api.onPtyExit(() => {
+    const unsubExit = window.api.onPtyExit(id, () => {
       xterm.writeln('\r\n[Process exited]')
+      spawnedRef.current = false
     })
 
-    // Send input
     xterm.onData((data) => {
-      window.api.ptyWrite(data)
+      window.api.ptyWrite(id, data)
     })
 
-    // Handle resize
     const resizeObserver = new ResizeObserver(() => {
       try {
         fitAddon.fit()
-        window.api.ptyResize(xterm.cols, xterm.rows)
+        if (spawnedRef.current) {
+          window.api.ptyResize(id, xterm.cols, xterm.rows)
+        }
       } catch { /* ignore */ }
     })
     resizeObserver.observe(termRef.current)
 
     return () => {
+      initializedRef.current = false
       resizeObserver.disconnect()
       unsubData()
       unsubExit()
-      window.api.ptyKill()
+      window.api.ptyKill(id)
       xterm.dispose()
     }
-  }, [])
+  }, [id, cwd, cmd])
 
-  const launchClaude = () => {
-    if (!xtermRef.current) return
-    window.api.ptyWrite('claude\n')
+  // Re-fit when becoming visible
+  useEffect(() => {
+    if (visible && fitAddonRef.current) {
+      setTimeout(() => fitAddonRef.current?.fit(), 50)
+    }
+  }, [visible])
+
+  return (
+    <div
+      ref={termRef}
+      className="terminal-content"
+      style={visible ? undefined : { display: 'none' }}
+    />
+  )
+}
+
+export default function Terminal() {
+  const [mode, setMode] = useState<'terminal' | 'claude'>('terminal')
+  const [claudeSpawned, setClaudeSpawned] = useState(false)
+  const syncDir = useAppStore((s) => s.syncDir) || '/tmp'
+
+  const launchClaude = useCallback(() => {
+    setClaudeSpawned(true)
     setMode('claude')
-  }
-
-  const sendToClaude = (prompt: string) => {
-    if (!xtermRef.current) return
-    window.api.ptyWrite(prompt + '\n')
-  }
+  }, [])
 
   return (
     <div className="terminal-panel">
@@ -118,15 +144,23 @@ export default function Terminal() {
           Claude
         </button>
         <div className="pdf-toolbar-spacer" />
-        <QuickActions onSend={sendToClaude} />
+        <QuickActions ptyId={claudeSpawned ? 'claude' : 'terminal'} />
       </div>
-      <div ref={termRef} className="terminal-content" />
+
+      <TerminalInstance id="terminal" cwd={syncDir} visible={mode === 'terminal'} />
+      {claudeSpawned && (
+        <TerminalInstance id="claude" cwd={syncDir} cmd="claude" args={[]} visible={mode === 'claude'} />
+      )}
     </div>
   )
 }
 
-function QuickActions({ onSend }: { onSend: (cmd: string) => void }) {
+function QuickActions({ ptyId }: { ptyId: string }) {
   const { activeTab, fileContents } = useAppStore()
+
+  const send = (prompt: string) => {
+    window.api.ptyWrite(ptyId, prompt + '\n')
+  }
 
   const actions = [
     {
@@ -134,7 +168,7 @@ function QuickActions({ onSend }: { onSend: (cmd: string) => void }) {
       action: () => {
         const log = useAppStore.getState().compileLog
         if (log) {
-          onSend(`Fix these LaTeX compilation errors:\n${log.slice(-2000)}`)
+          send(`Fix these LaTeX compilation errors:\n${log.slice(-2000)}`)
         }
       }
     },
@@ -142,7 +176,7 @@ function QuickActions({ onSend }: { onSend: (cmd: string) => void }) {
       label: 'Review',
       action: () => {
         if (activeTab && fileContents[activeTab]) {
-          onSend(`Review this LaTeX file for issues and improvements: ${activeTab}`)
+          send(`Review this LaTeX file for issues and improvements: ${activeTab}`)
         }
       }
     },
@@ -150,7 +184,7 @@ function QuickActions({ onSend }: { onSend: (cmd: string) => void }) {
       label: 'Explain',
       action: () => {
         if (activeTab) {
-          onSend(`Explain the structure and content of: ${activeTab}`)
+          send(`Explain the structure and content of: ${activeTab}`)
         }
       }
     }

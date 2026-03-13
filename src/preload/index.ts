@@ -16,20 +16,20 @@ const api = {
     return () => ipcRenderer.removeListener('latex:log', handler)
   },
 
-  // Terminal
-  ptySpawn: (cwd: string) => ipcRenderer.invoke('pty:spawn', cwd),
-  ptyWrite: (data: string) => ipcRenderer.invoke('pty:write', data),
-  ptyResize: (cols: number, rows: number) => ipcRenderer.invoke('pty:resize', cols, rows),
-  ptyKill: () => ipcRenderer.invoke('pty:kill'),
-  onPtyData: (cb: (data: string) => void) => {
+  // Terminal (supports multiple named instances)
+  ptySpawn: (id: string, cwd: string, cmd?: string, args?: string[]) => ipcRenderer.invoke('pty:spawn', id, cwd, cmd, args),
+  ptyWrite: (id: string, data: string) => ipcRenderer.invoke('pty:write', id, data),
+  ptyResize: (id: string, cols: number, rows: number) => ipcRenderer.invoke('pty:resize', id, cols, rows),
+  ptyKill: (id: string) => ipcRenderer.invoke('pty:kill', id),
+  onPtyData: (id: string, cb: (data: string) => void) => {
     const handler = (_e: Electron.IpcRendererEvent, data: string) => cb(data)
-    ipcRenderer.on('pty:data', handler)
-    return () => ipcRenderer.removeListener('pty:data', handler)
+    ipcRenderer.on(`pty:data:${id}`, handler)
+    return () => ipcRenderer.removeListener(`pty:data:${id}`, handler)
   },
-  onPtyExit: (cb: () => void) => {
+  onPtyExit: (id: string, cb: () => void) => {
     const handler = () => cb()
-    ipcRenderer.on('pty:exit', handler)
-    return () => ipcRenderer.removeListener('pty:exit', handler)
+    ipcRenderer.on(`pty:exit:${id}`, handler)
+    return () => ipcRenderer.removeListener(`pty:exit:${id}`, handler)
   },
 
   // SyncTeX
