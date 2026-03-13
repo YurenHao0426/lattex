@@ -4,7 +4,6 @@
 import { app, BrowserWindow, ipcMain, dialog, shell, net } from 'electron'
 import { join, basename } from 'path'
 import { readFile, writeFile } from 'fs/promises'
-import { createReadStream } from 'fs'
 import { spawn } from 'child_process'
 import * as pty from 'node-pty'
 import { OverleafSocket, type RootFolder, type SubFolder, type JoinDocResult } from './overleafSocket'
@@ -650,7 +649,7 @@ ipcMain.handle('ot:connect', async (_e, projectId: string) => {
 
     // Set up file sync bridge for bidirectional sync
     const tmpDir = compilationManager.dir
-    fileSyncBridge = new FileSyncBridge(overleafSock, tmpDir, docPathMap, pathDocMap, mainWindow!)
+    fileSyncBridge = new FileSyncBridge(overleafSock, tmpDir, docPathMap, pathDocMap, fileRefs, mainWindow!, projectId, overleafSessionCookie, overleafCsrfToken)
     fileSyncBridge.start().catch((e) => {
       console.log('[ot:connect] fileSyncBridge start error:', e)
     })
