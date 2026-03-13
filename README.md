@@ -31,6 +31,10 @@ Download the latest `.dmg` from [Releases](https://github.com/YurenHao0426/latte
 - macOS (Apple Silicon)
 - [TeX Live](https://www.tug.org/texlive/) or [MacTeX](https://www.tug.org/mactex/) for local compilation
 
+## Recommendation
+
+Install [Claude Code](https://code.claude.com/docs/en/setup) for AI-assisted LaTeX writing. Run it in the integrated terminal and let it edit your `.tex` files directly — changes sync to Overleaf in real-time.
+
 ## Development
 
 ```bash
