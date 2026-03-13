@@ -625,12 +625,15 @@ ipcMain.handle('ot:connect', async (_e, projectId: string) => {
     })
 
     // otUpdateApplied: server acknowledges our op (ack signal for OT client)
+    // Only ack when there's no 'op' field — presence of 'op' means it's a remote update, not our ack
     overleafSock.on('serverEvent', (name: string, args: unknown[]) => {
       if (name === 'otUpdateApplied') {
-        const update = args[0] as { doc?: string; v?: number } | undefined
-        if (update?.doc) {
+        const update = args[0] as { doc?: string; op?: unknown[]; v?: number } | undefined
+        if (update?.doc && !update.op) {
           sendToRenderer('ot:ack', { docId: update.doc })
         }
+      } else if (name === 'otUpdateError') {
+        console.log(`[ot:error] server rejected update:`, JSON.stringify(args).slice(0, 500))
       }
     })
 
@@ -662,9 +665,7 @@ ipcMain.handle('ot:connect', async (_e, projectId: string) => {
     // Set up file sync bridge for bidirectional sync
     const tmpDir = compilationManager.dir
     fileSyncBridge = new FileSyncBridge(overleafSock, tmpDir, docPathMap, pathDocMap, fileRefs, mainWindow!, projectId, overleafSessionCookie, overleafCsrfToken)
-    fileSyncBridge.start().catch((e) => {
-      console.log('[ot:connect] fileSyncBridge start error:', e)
-    })
+    await fileSyncBridge.start()
 
     return {
       success: true,
@@ -703,7 +704,6 @@ ipcMain.handle('ot:joinDoc', async (_e, docId: string) => {
   try {
     const result = await overleafSock.joinDoc(docId)
     const content = (result.docLines || []).join('\n')
-
     // Update compilation manager with doc content
     if (compilationManager && overleafSock.projectData) {
       const { docPathMap } = walkRootFolder(overleafSock.projectData.project.rootFolder)

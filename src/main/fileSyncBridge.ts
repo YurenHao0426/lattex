@@ -3,7 +3,7 @@
 
 // Bidirectional file sync bridge: temp dir ↔ Overleaf via OT (text) + REST (binary)
 import { join, dirname } from 'path'
-import { readFile, writeFile, mkdir, unlink, rename as fsRename } from 'fs/promises'
+import { readFile, writeFile, mkdir, unlink, rename as fsRename, appendFile } from 'fs/promises'
 import { createHash } from 'crypto'
 import * as chokidar from 'chokidar'
 import { diff_match_patch } from 'diff-match-patch'
@@ -15,6 +15,12 @@ import type { OtOp } from './otTypes'
 import { isInsert, isDelete } from './otTypes'
 
 const dmp = new diff_match_patch()
+const LOG_FILE = '/tmp/lattex-bridge.log'
+function bridgeLog(msg: string) {
+  const line = `[${new Date().toISOString()}] ${msg}`
+  console.log(line)
+  appendFile(LOG_FILE, line + '\n').catch(() => {})
+}
 
 export class FileSyncBridge {
   private lastKnownContent = new Map<string, string>()   // relPath → content (text docs)
@@ -75,24 +81,7 @@ export class FileSyncBridge {
     const docIds = Object.keys(this.docPathMap)
     for (const docId of docIds) {
       const relPath = this.docPathMap[docId]
-      try {
-        const result = await this.socket.joinDoc(docId)
-        const content = (result.docLines || []).join('\n')
-        this.lastKnownContent.set(relPath, content)
-
-        // Create OtClient for this doc (bridge owns it initially)
-        const otClient = new OtClient(
-          result.version,
-          (ops, version) => this.sendOps(docId, ops, version),
-          (ops) => this.onRemoteApply(docId, ops)
-        )
-        this.otClients.set(docId, otClient)
-
-        // Write to disk
-        await this.writeToDisk(relPath, content)
-      } catch (e) {
-        console.log(`[FileSyncBridge] failed to join doc ${relPath}:`, e)
-      }
+      await this.joinAndSyncDoc(docId, relPath, 3)
     }
 
     // Download all binary files
@@ -102,7 +91,7 @@ export class FileSyncBridge {
       try {
         await this.downloadBinary(fileRefId, relPath)
       } catch (e) {
-        console.log(`[FileSyncBridge] failed to download ${relPath}:`, e)
+        bridgeLog(`[FileSyncBridge] failed to download ${relPath}:`, e)
       }
     }
 
@@ -137,20 +126,31 @@ export class FileSyncBridge {
       ]
     })
 
+    this.watcher.on('ready', () => {
+      bridgeLog(`[FileSyncBridge] chokidar ready, watching ${this.tmpDir}`)
+    })
+
     this.watcher.on('change', (absPath: string) => {
       const relPath = absPath.replace(this.tmpDir + '/', '')
+      bridgeLog(`[FileSyncBridge] chokidar change: ${relPath}`)
       this.onFileChanged(relPath)
     })
 
     this.watcher.on('add', (absPath: string) => {
       const relPath = absPath.replace(this.tmpDir + '/', '')
+      bridgeLog(`[FileSyncBridge] chokidar add: ${relPath}`)
       // Process if it's a known doc or fileRef
       if (this.pathDocMap[relPath] || this.pathFileRefMap[relPath]) {
         this.onFileChanged(relPath)
       }
     })
 
-    console.log(`[FileSyncBridge] started, watching ${this.tmpDir}, ${docIds.length} docs + ${fileRefIds.length} files synced`)
+    this.watcher.on('unlink', (absPath: string) => {
+      const relPath = absPath.replace(this.tmpDir + '/', '')
+      bridgeLog(`[FileSyncBridge] chokidar unlink: ${relPath}`)
+    })
+
+    bridgeLog(`[FileSyncBridge] started, watching ${this.tmpDir}, ${docIds.length} docs + ${fileRefIds.length} files synced`)
   }
 
   async stop(): Promise<void> {
@@ -181,6 +181,37 @@ export class FileSyncBridge {
     this.editorDocs.clear()
 
     console.log('[FileSyncBridge] stopped')
+  }
+
+  /** Join a doc with retry logic for transient errors like joinLeaveEpoch mismatch */
+  private async joinAndSyncDoc(docId: string, relPath: string, retries: number): Promise<void> {
+    for (let attempt = 0; attempt <= retries; attempt++) {
+      try {
+        if (attempt > 0) {
+          await new Promise(r => setTimeout(r, 300 * attempt))
+        }
+        const result = await this.socket.joinDoc(docId)
+        const content = (result.docLines || []).join('\n')
+        this.lastKnownContent.set(relPath, content)
+
+        const otClient = new OtClient(
+          result.version,
+          (ops, version) => this.sendOps(docId, ops, version),
+          (ops) => this.onRemoteApply(docId, ops)
+        )
+        this.otClients.set(docId, otClient)
+
+        await this.writeToDisk(relPath, content)
+        return
+      } catch (e) {
+        const msg = String(e)
+        if (msg.includes('joinLeaveEpoch') && attempt < retries) {
+          bridgeLog(`[FileSyncBridge] joinDoc retry ${attempt + 1}/${retries} for ${relPath}: ${msg}`)
+          continue
+        }
+        bridgeLog(`[FileSyncBridge] failed to join doc ${relPath}:`, e)
+      }
+    }
   }
 
   // ── OT update handler ─────────────────────────────────────
@@ -220,7 +251,7 @@ export class FileSyncBridge {
     const folderPath = this.findFolderPath(folderId)
     const relPath = folderPath + fileRef.name
 
-    console.log(`[FileSyncBridge] remote new file: ${relPath} (${fileRef._id})`)
+    bridgeLog(`[FileSyncBridge] remote new file: ${relPath} (${fileRef._id})`)
 
     // Register in maps
     this.fileRefPathMap[fileRef._id] = relPath
@@ -228,7 +259,7 @@ export class FileSyncBridge {
 
     // Download to disk
     this.downloadBinary(fileRef._id, relPath).catch((e) => {
-      console.log(`[FileSyncBridge] failed to download new file ${relPath}:`, e)
+      bridgeLog(`[FileSyncBridge] failed to download new file ${relPath}:`, e)
     })
   }
 
@@ -242,7 +273,7 @@ export class FileSyncBridge {
     const folderPath = this.findFolderPath(folderId)
     const relPath = folderPath + doc.name
 
-    console.log(`[FileSyncBridge] remote new doc: ${relPath} (${doc._id})`)
+    bridgeLog(`[FileSyncBridge] remote new doc: ${relPath} (${doc._id})`)
 
     // Register in maps
     this.docPathMap[doc._id] = relPath
@@ -262,7 +293,7 @@ export class FileSyncBridge {
 
       this.writeToDisk(relPath, content)
     }).catch((e) => {
-      console.log(`[FileSyncBridge] failed to join new doc ${relPath}:`, e)
+      bridgeLog(`[FileSyncBridge] failed to join new doc ${relPath}:`, e)
     })
   }
 
@@ -274,7 +305,7 @@ export class FileSyncBridge {
     // Check if it's a doc
     const docPath = this.docPathMap[entityId]
     if (docPath) {
-      console.log(`[FileSyncBridge] remote remove doc: ${docPath}`)
+      bridgeLog(`[FileSyncBridge] remote remove doc: ${docPath}`)
       delete this.docPathMap[entityId]
       delete this.pathDocMap[docPath]
       this.lastKnownContent.delete(docPath)
@@ -286,7 +317,7 @@ export class FileSyncBridge {
     // Check if it's a fileRef
     const filePath = this.fileRefPathMap[entityId]
     if (filePath) {
-      console.log(`[FileSyncBridge] remote remove file: ${filePath}`)
+      bridgeLog(`[FileSyncBridge] remote remove file: ${filePath}`)
       delete this.fileRefPathMap[entityId]
       delete this.pathFileRefMap[filePath]
       this.binaryHashes.delete(filePath)
@@ -304,7 +335,7 @@ export class FileSyncBridge {
     const oldDocPath = this.docPathMap[entityId]
     if (oldDocPath) {
       const newPath = dirname(oldDocPath) === '.' ? newName : dirname(oldDocPath) + '/' + newName
-      console.log(`[FileSyncBridge] remote rename doc: ${oldDocPath} → ${newPath}`)
+      bridgeLog(`[FileSyncBridge] remote rename doc: ${oldDocPath} → ${newPath}`)
 
       // Update maps
       this.docPathMap[entityId] = newPath
@@ -327,7 +358,7 @@ export class FileSyncBridge {
     const oldFilePath = this.fileRefPathMap[entityId]
     if (oldFilePath) {
       const newPath = dirname(oldFilePath) === '.' ? newName : dirname(oldFilePath) + '/' + newName
-      console.log(`[FileSyncBridge] remote rename file: ${oldFilePath} → ${newPath}`)
+      bridgeLog(`[FileSyncBridge] remote rename file: ${oldFilePath} → ${newPath}`)
 
       // Update maps
       this.fileRefPathMap[entityId] = newPath
@@ -386,7 +417,12 @@ export class FileSyncBridge {
     if (this.stopped) return
 
     // Layer 1: Skip if bridge is currently writing this file
-    if (this.writesInProgress.has(relPath)) return
+    if (this.writesInProgress.has(relPath)) {
+      bridgeLog(`[FileSyncBridge] skipping ${relPath} (write in progress)`)
+      return
+    }
+
+    bridgeLog(`[FileSyncBridge] onFileChanged: ${relPath}, isDoc=${!!this.pathDocMap[relPath]}, isFile=${!!this.pathFileRefMap[relPath]}, isEditorDoc=${this.editorDocs.has(this.pathDocMap[relPath] || '')}`)
 
     // Layer 3: Debounce 300ms per file
     const existing = this.debounceTimers.get(relPath)
@@ -418,19 +454,24 @@ export class FileSyncBridge {
     let newContent: string
     try {
       newContent = await readFile(join(this.tmpDir, relPath), 'utf-8')
-    } catch {
+    } catch (e) {
+      bridgeLog(`[FileSyncBridge] read error for ${relPath}:`, e)
       return // file deleted or unreadable
     }
 
     const lastKnown = this.lastKnownContent.get(relPath)
 
     // Layer 2: Content equality check
-    if (newContent === lastKnown) return
+    if (newContent === lastKnown) {
+      bridgeLog(`[FileSyncBridge] content unchanged for ${relPath}, skipping`)
+      return
+    }
 
-    console.log(`[FileSyncBridge] disk change detected: ${relPath} (${(newContent.length)} chars)`)
+    bridgeLog(`[FileSyncBridge] disk change detected: ${relPath} (${newContent.length} chars, was ${lastKnown?.length ?? 'undefined'})`)
 
     if (this.editorDocs.has(docId)) {
       // Doc is open in editor → send to renderer via IPC
+      bridgeLog(`[FileSyncBridge] → sending sync:externalEdit to renderer for ${relPath}`)
       this.lastKnownContent.set(relPath, newContent)
       this.mainWindow.webContents.send('sync:externalEdit', { docId, content: newContent })
     } else {
@@ -442,10 +483,14 @@ export class FileSyncBridge {
       dmp.diff_cleanupEfficiency(diffs)
       const ops = diffsToOtOps(diffs)
 
+      bridgeLog(`[FileSyncBridge] → direct OT for ${relPath}: ${ops.length} ops`)
+
       if (ops.length > 0) {
         const otClient = this.otClients.get(docId)
         if (otClient) {
           otClient.onLocalOps(ops)
+        } else {
+          bridgeLog(`[FileSyncBridge] WARNING: no OtClient for docId ${docId}`)
         }
       }
     }
@@ -466,14 +511,14 @@ export class FileSyncBridge {
     const oldHash = this.binaryHashes.get(relPath)
     if (newHash === oldHash) return
 
-    console.log(`[FileSyncBridge] binary change detected: ${relPath} (${fileData.length} bytes)`)
+    bridgeLog(`[FileSyncBridge] binary change detected: ${relPath} (${fileData.length} bytes)`)
     this.binaryHashes.set(relPath, newHash)
 
     // Upload to Overleaf via REST API (this replaces the existing file)
     try {
       await this.uploadBinary(relPath, fileData)
     } catch (e) {
-      console.log(`[FileSyncBridge] failed to upload binary ${relPath}:`, e)
+      bridgeLog(`[FileSyncBridge] failed to upload binary ${relPath}:`, e)
     }
   }
 
@@ -499,7 +544,7 @@ export class FileSyncBridge {
             // Set write guard before writing
             this.writesInProgress.add(relPath)
             await writeFile(fullPath, data)
-            setTimeout(() => this.writesInProgress.delete(relPath), 150)
+            setTimeout(() => this.writesInProgress.delete(relPath), 1000)
 
             // Store hash
             this.binaryHashes.set(relPath, createHash('sha1').update(data).digest('hex'))
@@ -554,7 +599,7 @@ export class FileSyncBridge {
       req.on('response', (res) => {
         res.on('data', (chunk: Buffer) => { resBody += chunk.toString() })
         res.on('end', () => {
-          console.log(`[FileSyncBridge] upload ${relPath}: ${res.statusCode} ${resBody.slice(0, 200)}`)
+          bridgeLog(`[FileSyncBridge] upload ${relPath}: ${res.statusCode} ${resBody.slice(0, 200)}`)
           try {
             const data = JSON.parse(resBody)
             if (data.success !== false && !data.error) {
@@ -675,7 +720,7 @@ export class FileSyncBridge {
 
       this.writeToDisk(relPath, content)
     }).catch((e) => {
-      console.log(`[FileSyncBridge] failed to re-join doc ${relPath}:`, e)
+      bridgeLog(`[FileSyncBridge] failed to re-join doc ${relPath}:`, e)
     })
   }
 
@@ -691,7 +736,7 @@ export class FileSyncBridge {
       await mkdir(dir, { recursive: true })
       await writeFile(fullPath, content, 'utf-8')
     } catch (e) {
-      console.log(`[FileSyncBridge] write error for ${relPath}:`, e)
+      bridgeLog(`[FileSyncBridge] write error for ${relPath}:`, e)
     }
 
     setTimeout(() => {
@@ -721,7 +766,7 @@ export class FileSyncBridge {
       await mkdir(dirname(newFull), { recursive: true })
       await fsRename(oldFull, newFull)
     } catch (e) {
-      console.log(`[FileSyncBridge] rename error ${oldRelPath} → ${newRelPath}:`, e)
+      bridgeLog(`[FileSyncBridge] rename error ${oldRelPath} → ${newRelPath}:`, e)
     }
 
     setTimeout(() => {

@@ -19,6 +19,7 @@ export class OverleafDocSync {
   private view: EditorView | null = null
   private docId: string
   private pendingChanges: ChangeSet | null = null
+  private pendingBaseDoc: Text | null = null // doc before pendingChanges
   private debounceTimer: ReturnType<typeof setTimeout> | null = null
   private debounceMs = 150
 
@@ -46,6 +47,7 @@ export class OverleafDocSync {
       this.pendingChanges = this.pendingChanges.compose(changes)
     } else {
       this.pendingChanges = changes
+      this.pendingBaseDoc = oldDoc // save the base doc for correct OT op generation
     }
 
     // Debounce send
@@ -54,27 +56,15 @@ export class OverleafDocSync {
   }
 
   private flushLocalChanges() {
-    if (!this.pendingChanges || !this.view) return
+    if (!this.pendingChanges || !this.view || !this.pendingBaseDoc) return
 
-    const oldDoc = this.view.state.doc
-    // We need the doc state BEFORE the pending changes were applied
-    // Since we composed changes incrementally, we work backward
-    // Actually, we stored the ChangeSet which maps old positions, so we convert directly
-    const ops = changeSetToOtOps(this.pendingChanges, this.getOldDoc())
+    const ops = changeSetToOtOps(this.pendingChanges, this.pendingBaseDoc)
     this.pendingChanges = null
+    this.pendingBaseDoc = null
 
     if (ops.length > 0) {
       this.otClient.onLocalOps(ops)
     }
-  }
-
-  private getOldDoc(): Text {
-    // The "old doc" is the current doc minus pending local changes
-    // Since pendingChanges is null at send time (we just cleared it),
-    // and the ChangeSet was already composed against the old doc,
-    // we just use the doc that was current when changes started accumulating.
-    // For simplicity, we pass the doc at change time via changeSetToOtOps
-    return this.view!.state.doc
   }
 
   /** Send ops to server via IPC */
@@ -114,6 +104,7 @@ export class OverleafDocSync {
   reset(version: number, docContent: string) {
     this.otClient.reset(version)
     this.pendingChanges = null
+    this.pendingBaseDoc = null
     if (this.debounceTimer) {
       clearTimeout(this.debounceTimer)
       this.debounceTimer = null
@@ -164,5 +155,6 @@ export class OverleafDocSync {
     if (this.debounceTimer) clearTimeout(this.debounceTimer)
     this.view = null
     this.pendingChanges = null
+    this.pendingBaseDoc = null
   }
 }
