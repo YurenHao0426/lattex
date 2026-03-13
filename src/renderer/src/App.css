@@ -280,6 +280,20 @@ html, body, #root {
   margin: 0 4px;
 }
 
+/* ── Sidebar Panel ──────────────────────────────────────────── */
+
+.sidebar-panel {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.sidebar-panel .file-tree {
+  flex: 1;
+  min-height: 0;
+}
+
 /* ── File Tree ───────────────────────────────────────────────── */
 
 .file-tree {
@@ -2110,4 +2124,103 @@ html, body, #root {
   font-family: var(--font-sans) !important;
   font-size: 12px !important;
   max-width: 350px;
+}
+
+/* ── Outline View ──────────────────────────────────────────── */
+
+.outline-view {
+  background: var(--bg-secondary);
+  border-top: 1px solid var(--border);
+  user-select: none;
+  flex-shrink: 0;
+  max-height: 40%;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.outline-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  cursor: pointer;
+}
+
+.outline-header:hover {
+  background: var(--bg-tertiary);
+}
+
+.outline-toggle {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  width: 12px;
+}
+
+.outline-count {
+  margin-left: auto;
+  font-size: 10px;
+  color: var(--text-muted);
+  background: var(--bg-tertiary);
+  padding: 1px 6px;
+  border-radius: 8px;
+}
+
+.outline-content {
+  overflow-y: auto;
+  padding-bottom: 4px;
+}
+
+.outline-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 8px;
+  font-size: 12px;
+  color: var(--text-primary);
+  cursor: pointer;
+  line-height: 1.5;
+}
+
+.outline-item:hover {
+  background: var(--bg-tertiary);
+}
+
+.outline-item.active {
+  background: rgba(74, 111, 165, 0.15);
+}
+
+.outline-item-icon {
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--text-muted);
+  min-width: 20px;
+  font-family: var(--font-mono);
+}
+
+.outline-item-title {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.outline-item-line {
+  font-size: 10px;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+}
+
+/* ── Math Preview ──────────────────────────────────────────── */
+
+.cm-math-preview {
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-md);
 }

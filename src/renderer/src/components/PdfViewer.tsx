@@ -150,24 +150,48 @@ export default function PdfViewer() {
     : logEntries.filter((e) => e.level === logFilter)
 
   // Navigate to file:line in editor
-  const handleEntryClick = (entry: LogEntry) => {
+  const handleEntryClick = async (entry: LogEntry) => {
     if (!entry.line) return
     const store = useAppStore.getState()
 
-    // If no file specified, try to use the main document's path
-    const entryFile = entry.file || null
+    // If no file specified, fall back to the main document's relative path
+    let entryFile = entry.file || null
+    if (!entryFile) {
+      const rootDocId = store.mainDocument || store.overleafProject?.rootDocId
+      if (rootDocId) {
+        entryFile = store.docPathMap[rootDocId] || null
+      }
+    }
     if (!entryFile) return
 
-    // In socket mode, files are keyed by relative path in fileContents
-    // Try to find a matching open file
+    // Build candidate paths (with and without leading ./)
     const candidates = [entryFile]
-    // Also try without leading ./ or path prefix
     if (entryFile.startsWith('./')) candidates.push(entryFile.slice(2))
+    else candidates.push('./' + entryFile)
 
+    // Try to find the file — either already open or needs to be joined
     for (const path of candidates) {
+      // Already loaded in editor
       if (store.fileContents[path]) {
         store.openFile(path, path.split('/').pop() || path)
         store.setPendingGoTo({ file: path, line: entry.line! })
+        return
+      }
+
+      // Not yet loaded — look up the docId and join it via socket
+      const docId = store.pathDocMap[path]
+      if (docId) {
+        try {
+          const result = await window.api.otJoinDoc(docId)
+          if (result.success && result.content !== undefined) {
+            useAppStore.getState().setFileContent(path, result.content)
+            if (result.version !== undefined) {
+              useAppStore.getState().setDocVersion(docId, result.version)
+            }
+            useAppStore.getState().openFile(path, path.split('/').pop() || path)
+            useAppStore.getState().setPendingGoTo({ file: path, line: entry.line! })
+          }
+        } catch { /* failed to join doc */ }
         return
       }
     }

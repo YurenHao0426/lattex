@@ -21,6 +21,9 @@ import { addCommentTooltip, setAddCommentCallback } from '../extensions/addComme
 import { otSyncExtension, remoteUpdateAnnotation } from '../extensions/otSyncExtension'
 import { remoteCursorsExtension, setRemoteCursorsEffect, type RemoteCursor } from '../extensions/remoteCursors'
 import { latexAutocomplete } from '../extensions/latexAutocomplete'
+import { latexFolding } from '../extensions/latexFolding'
+import { latexClosing } from '../extensions/latexClosing'
+import { mathPreview } from '../extensions/mathPreview'
 import { OverleafDocSync } from '../ot/overleafSync'
 import { activeDocSyncs, remoteCursors } from '../App'
 
@@ -43,17 +46,21 @@ const cosmicLatteTheme = EditorView.theme({
   '.cm-lineNumbers .cm-gutterElement': { padding: '0 8px' },
   '.cm-foldGutter': { width: '16px' },
   '.cm-matchingBracket': { backgroundColor: '#D4C9A8', outline: 'none' },
-  '.cm-keyword': { color: '#8B2252' },
-  '.cm-atom': { color: '#B8860B' },
-  '.cm-string': { color: '#5B8A3C' },
+  // LaTeX syntax colors
+  '.cm-keyword': { color: '#8B2252', fontWeight: '600' },  // \commands
+  '.cm-atom': { color: '#B8860B' },        // special symbols
+  '.cm-string': { color: '#5B8A3C' },      // arguments
   '.cm-comment': { color: '#A09880', fontStyle: 'italic' },
-  '.cm-bracket': { color: '#4A6FA5' },
-  '.cm-tag': { color: '#8B2252' },
+  '.cm-bracket': { color: '#4A6FA5' },     // { } [ ]
+  '.cm-tag': { color: '#8B2252', fontWeight: '600' },  // \begin \end
   '.cm-builtin': { color: '#6B5B3E' },
-  '.ͼ5': { color: '#8B2252' },
-  '.ͼ6': { color: '#4A6FA5' },
-  '.ͼ7': { color: '#5B8A3C' },
-  '.ͼ8': { color: '#A09880' },
+  '.cm-meta': { color: '#C75643' },        // $ math delimiters
+  '.cm-number': { color: '#B8860B' },
+  // StreamLanguage stex token class overrides
+  '.ͼ5': { color: '#8B2252', fontWeight: '600' },  // keyword
+  '.ͼ6': { color: '#4A6FA5' },                      // bracket/variable
+  '.ͼ7': { color: '#5B8A3C' },                      // string
+  '.ͼ8': { color: '#A09880', fontStyle: 'italic' }, // comment
 }, { dark: false })
 
 export default function Editor() {
@@ -226,6 +233,9 @@ export default function Editor() {
         updateListener,
         EditorView.lineWrapping,
         latexAutocomplete(),
+        latexFolding(),
+        latexClosing(),
+        mathPreview(),
         commentHighlights(),
         overleafProjectId ? addCommentTooltip() : [],
         ...otExt,

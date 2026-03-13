@@ -8,6 +8,7 @@ import ModalProvider from './components/ModalProvider'
 import ProjectList from './components/ProjectList'
 import Toolbar from './components/Toolbar'
 import FileTree from './components/FileTree'
+import OutlineView from './components/OutlineView'
 import Editor from './components/Editor'
 import PdfViewer from './components/PdfViewer'
 import Terminal from './components/Terminal'
@@ -333,7 +334,10 @@ export default function App() {
             {showFileTree && (
               <>
                 <Panel defaultSize={18} minSize={12} maxSize={35}>
-                  <FileTree />
+                  <div className="sidebar-panel">
+                    <FileTree />
+                    <OutlineView />
+                  </div>
                 </Panel>
                 <PanelResizeHandle className="resize-handle resize-handle-h" />
               </>
