@@ -100,18 +100,28 @@ ipcMain.handle('pty:spawn', async (_e, id: string, cwd: string, cmd?: string, ar
 
   const shellPath = cmd || process.env.SHELL || '/bin/zsh'
   const shellArgs = args || ['-l']
+  const ptyEnv: Record<string, string> = {
+    ...(process.env as Record<string, string>),
+    TERM: 'xterm-256color',
+    COLORTERM: 'truecolor',
+    TERM_PROGRAM: 'LatteX',
+    LANG: process.env.LANG || 'en_US.UTF-8',
+  }
   const instance = pty.spawn(shellPath, shellArgs, {
     name: 'xterm-256color',
     cols: 80,
     rows: 24,
     cwd,
-    env: process.env as Record<string, string>
+    env: ptyEnv
   })
 
   ptyInstances.set(id, instance)
 
   instance.onData((data) => {
-    sendToRenderer(`pty:data:${id}`, data)
+    // Strip DEC 2026 synchronized output sequences — xterm.js may buffer indefinitely
+    // if the begin/end markers are split across PTY chunks
+    const cleaned = data.replace(/\x1b\[\?2026[hl]/g, '')
+    if (cleaned) sendToRenderer(`pty:data:${id}`, cleaned)
   })
 
   instance.onExit(() => {

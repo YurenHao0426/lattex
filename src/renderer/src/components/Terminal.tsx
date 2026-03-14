@@ -53,7 +53,13 @@ function TerminalInstance({ id, cwd, cmd, args, visible }: {
       fontFamily: '"SF Mono", "Fira Code", "JetBrains Mono", monospace',
       fontSize: 13,
       cursorBlink: true,
-      scrollback: 10000
+      scrollback: 10000,
+      windowOptions: {
+        getWinSizePixels: true,
+        getCellSizePixels: true,
+        getWinSizeChars: true,
+        getWinPosition: true,
+      }
     })
 
     const fitAddon = new FitAddon()
@@ -149,7 +155,7 @@ export default function Terminal() {
 
       <TerminalInstance id="terminal" cwd={syncDir} visible={mode === 'terminal'} />
       {claudeSpawned && (
-        <TerminalInstance id="claude" cwd={syncDir} cmd="claude" args={[]} visible={mode === 'claude'} />
+        <TerminalInstance id="claude" cwd={syncDir} args={['-l', '-c', 'claude']} visible={mode === 'claude'} />
       )}
     </div>
   )
