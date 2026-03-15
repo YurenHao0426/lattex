@@ -25,6 +25,7 @@ files:
   - node_modules/binary-extensions/**/*
 asarUnpack:
   - node_modules/node-pty/**/*
+  - out/mcp/**/*
 afterPack: ./scripts/afterPack.js
 mac:
   icon: resources/icon.icns

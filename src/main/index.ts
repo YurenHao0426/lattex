@@ -752,8 +752,10 @@ ipcMain.handle('ot:connect', async (_e, projectId: string) => {
     mcpPathDocMap = pathDocMap
     writeMcpState()
     // Write .mcp.json so Claude Code auto-discovers the MCP server
-    const appRoot = app.isPackaged ? join(app.getAppPath(), '..') : join(__dirname, '..', '..')
-    const mcpServerPath = join(appRoot, 'src', 'mcp', 'lattex.mjs')
+    // Dev: use source file. Packaged: use bundled file in app.asar.unpacked/out/mcp/
+    const mcpServerPath = app.isPackaged
+      ? join(app.getAppPath() + '.unpacked', 'out', 'mcp', 'lattex.mjs')
+      : join(__dirname, '..', '..', 'src', 'mcp', 'lattex.mjs')
     writeFile(join(tmpDir, '.mcp.json'), JSON.stringify({
       mcpServers: {
         lattex: {
