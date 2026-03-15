@@ -768,9 +768,38 @@ ipcMain.handle('ot:connect', async (_e, projectId: string) => {
     require('fs').unlink(join(tmpDir, 'CLAUDE.md'), () => {})
     // Write .claude/ dir with CLAUDE.md + settings (dotfile dir = excluded from sync)
     mkdirAsync(join(tmpDir, '.claude'), { recursive: true }).then(async () => {
-    await writeFile(join(tmpDir, '.claude', 'CLAUDE.md'), `# LatteX Project — Overleaf Integration
+    const rootDocPath = docPathMap[projectResult.project.rootDoc_id] || 'main.tex'
+    const texFiles = Object.values(docPathMap).filter((p: string) => p.endsWith('.tex'))
+    const fileListStr = texFiles.map((p: string) => `- \`${p}\``).join('\n')
 
-This is a LaTeX project synced from Overleaf via LatteX. Files here are bidirectionally synced — edits you make will appear on Overleaf.
+    await writeFile(join(tmpDir, '.claude', 'CLAUDE.md'), `# ${projectResult.project.name} — Overleaf Project
+
+This is a LaTeX project synced from Overleaf via LatteX. All files here are **bidirectionally synced** — your edits appear on Overleaf in real-time, and vice versa.
+
+## Project Structure
+
+- **Main file**: \`${rootDocPath}\` (this is the root document for compilation)
+${fileListStr ? `- **TeX files**:\n${fileListStr}` : ''}
+
+## Guidelines
+
+### Before Starting
+- **Read the full document first.** Before making any changes, read through \`${rootDocPath}\` and its \\\\input/\\\\include files to understand the paper's structure, notation, and conventions.
+- **Check comments.** Use \`get_comments\` to see if there are reviewer comments or TODOs that inform what needs to be done.
+
+### Writing Style
+- **Match existing conventions.** Follow the notation, formatting, macro usage, and sectioning style already established in the document.
+- **Don't reorganize without asking.** Preserve the existing structure — don't move sections, rename labels, or refactor macros unless explicitly asked.
+- **Preserve \\\\label names.** Changing labels breaks cross-references across files. Only rename if asked.
+
+### Editing
+- **Make targeted edits.** Modify only the parts that need changing. Don't rewrite surrounding paragraphs for style.
+- **Compile after changes.** Use \`compile_latex\` to verify your edits don't introduce errors. If compilation fails, use \`get_compile_errors\` and fix immediately.
+- **One logical change at a time.** Don't mix unrelated edits in a single pass.
+
+### Collaboration
+- **Respond to comments.** When you address a comment, use \`reply_to_comment\` to explain what you changed, then \`resolve_comment\`.
+- **Don't delete others' comments.** Only resolve them after addressing the feedback.
 
 ## MCP Tools
 
@@ -800,9 +829,10 @@ You have MCP tools to interact with Overleaf. Use them proactively.
 
 #### Comment Workflow
 1. Use \`get_comments\` to see what reviewers have flagged
-2. Edit the .tex files to address the feedback
-3. Use \`reply_to_comment\` to explain what you changed
-4. Use \`resolve_comment\` to mark it as done
+2. Read the relevant sections to understand context
+3. Edit the .tex files to address the feedback
+4. Use \`reply_to_comment\` to explain what you changed
+5. Use \`resolve_comment\` to mark it as done
 
 #### Compile-Debug Workflow
 1. Edit .tex files
