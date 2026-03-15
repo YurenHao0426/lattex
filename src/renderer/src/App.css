@@ -1332,12 +1332,16 @@ html, body, #root {
   flex: 1;
   overflow: auto;
   padding: 16px;
+  background: #EDE5CE;
+  user-select: none;
+}
+
+.pdf-wrapper {
   display: flex;
   flex-direction: column;
   align-items: center;
   gap: 8px;
-  background: #EDE5CE;
-  user-select: none;
+  will-change: transform;
 }
 
 .pdf-page {

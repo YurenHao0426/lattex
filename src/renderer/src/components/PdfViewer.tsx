@@ -128,8 +128,14 @@ type LogFilter = 'all' | 'error' | 'warning'
 
 export default function PdfViewer() {
   const { pdfPath, compileLog, compiling } = useAppStore()
-  const containerRef = useRef<HTMLDivElement>(null)
+  const containerRef = useRef<HTMLDivElement>(null)  // scroll viewport
+  const wrapperRef = useRef<HTMLDivElement>(null)    // inner wrapper (CSS transform target)
   const [scale, setScale] = useState(1.0)
+  const [renderScale, setRenderScale] = useState(1.0)   // target scale for next render
+  const [renderedScale, setRenderedScale] = useState(1.0) // scale at which canvases were actually rendered
+  const renderScaleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const scaleRef = useRef(1.0)  // mutable ref for wheel handler
+  const renderedScaleRef = useRef(1.0)
   const [numPages, setNumPages] = useState(0)
   const [tab, setTab] = useState<'pdf' | 'log'>('pdf')
   const [logFilter, setLogFilter] = useState<LogFilter>('all')
@@ -220,11 +226,11 @@ export default function PdfViewer() {
     const canvas = (e.target as HTMLElement).closest('canvas.pdf-page') as HTMLCanvasElement | null
     if (!canvas) { console.log('[synctex-ui] no canvas target, target was:', (e.target as HTMLElement).tagName, (e.target as HTMLElement).className); return }
 
-    const container = containerRef.current
-    if (!container) return
+    const wrapper = wrapperRef.current
+    if (!wrapper) return
 
     // Determine which page was clicked
-    const canvases = Array.from(container.querySelectorAll('canvas.pdf-page'))
+    const canvases = Array.from(wrapper.querySelectorAll('canvas.pdf-page'))
     const pageIndex = canvases.indexOf(canvas)
     if (pageIndex < 0) return
     const pageNum = pageIndex + 1
@@ -273,9 +279,13 @@ export default function PdfViewer() {
     }
   }, [pdfPath])
 
-  // Render PDF (with lock to prevent double-render)
+  // Keep mutable refs in sync
+  useEffect(() => { scaleRef.current = scale }, [scale])
+  useEffect(() => { renderedScaleRef.current = renderedScale }, [renderedScale])
+
+  // Render PDF canvases at renderScale (expensive — only on pdfPath change or debounced scale)
   const renderPdf = useCallback(async () => {
-    if (!pdfPath || !containerRef.current || tab !== 'pdf') return
+    if (!pdfPath || !containerRef.current || !wrapperRef.current || tab !== 'pdf') return
     if (renderingRef.current) return
     renderingRef.current = true
 
@@ -286,15 +296,16 @@ export default function PdfViewer() {
       const pdf = await pdfjsLib.getDocument({ data }).promise
       setNumPages(pdf.numPages)
 
-      const container = containerRef.current
-      if (!container) { renderingRef.current = false; return }
-      container.innerHTML = ''
+      const wrapper = wrapperRef.current
+      if (!wrapper) { renderingRef.current = false; return }
+
+      // Render new canvases into a fragment (old canvases stay visible)
+      const frag = document.createDocumentFragment()
       pageViewportsRef.current.clear()
 
       for (let i = 1; i <= pdf.numPages; i++) {
         const page = await pdf.getPage(i)
-        const viewport = page.getViewport({ scale })
-
+        const viewport = page.getViewport({ scale: renderScale })
         const baseViewport = page.getViewport({ scale: 1 })
         pageViewportsRef.current.set(i, { width: baseViewport.width, height: baseViewport.height })
 
@@ -306,26 +317,79 @@ export default function PdfViewer() {
         canvas.style.width = `${viewport.width}px`
         canvas.style.height = `${viewport.height}px`
         context.scale(window.devicePixelRatio, window.devicePixelRatio)
-        container.appendChild(canvas)
+        frag.appendChild(canvas)
         await page.render({ canvasContext: context, viewport }).promise
       }
+
+      // Atomic swap: remove old canvases, insert new ones
+      wrapper.innerHTML = ''
+      wrapper.appendChild(frag)
+      // Now canvases match renderScale — update renderedScale so CSS transform adjusts
+      setRenderedScale(renderScale)
     } catch (err) {
       setError(`Failed to load PDF: ${err}`)
     } finally {
       renderingRef.current = false
     }
-  }, [pdfPath, scale, tab])
+  }, [pdfPath, renderScale, tab])
 
-  // Scroll wheel zoom on PDF container
+  // Apply CSS transform on wrapper for instant visual zoom
+  useEffect(() => {
+    const wrapper = wrapperRef.current
+    if (!wrapper) return
+    const cssScale = scale / renderedScale
+    if (Math.abs(cssScale - 1) < 0.001) {
+      wrapper.style.transform = ''
+      wrapper.style.transformOrigin = ''
+    } else {
+      wrapper.style.transform = `scale(${cssScale})`
+      wrapper.style.transformOrigin = 'top center'
+    }
+  }, [scale, renderedScale])
+
+  // Debounce: commit renderScale after user stops zooming (300ms)
+  useEffect(() => {
+    if (Math.abs(scale - renderScale) < 0.001) return
+    if (renderScaleTimerRef.current) clearTimeout(renderScaleTimerRef.current)
+    renderScaleTimerRef.current = setTimeout(() => {
+      setRenderScale(scale)
+    }, 300)
+    return () => { if (renderScaleTimerRef.current) clearTimeout(renderScaleTimerRef.current) }
+  }, [scale, renderScale])
+
+  // Scroll wheel zoom on PDF container — zoom-to-cursor
   useEffect(() => {
     const container = containerRef.current
     if (!container) return
     const handleWheel = (e: WheelEvent) => {
       if (!(e.ctrlKey || e.metaKey)) return
       e.preventDefault()
-      // Proportional delta clamped — smooth for trackpad pinch, reasonable for mouse wheel
+
+      const oldScale = scaleRef.current
       const delta = Math.max(-0.2, Math.min(0.2, -e.deltaY * 0.005))
-      setScale((s) => Math.min(3, Math.max(0.25, +(s + delta).toFixed(2))))
+      const newScale = Math.min(3, Math.max(0.25, +(oldScale + delta).toFixed(2)))
+      if (newScale === oldScale) return
+
+      // Zoom-to-cursor: keep the content point under the cursor stationary
+      const rect = container.getBoundingClientRect()
+      const cursorX = e.clientX - rect.left
+      const cursorY = e.clientY - rect.top
+
+      // Content point under cursor (in base PDF coordinates)
+      const oldCssScale = oldScale / renderedScaleRef.current
+      const contentX = (container.scrollLeft + cursorX) / oldCssScale
+      const contentY = (container.scrollTop + cursorY) / oldCssScale
+
+      // Update scale (triggers CSS transform via effect)
+      scaleRef.current = newScale
+      setScale(newScale)
+
+      // Adjust scroll so same content point stays under cursor
+      const newCssScale = newScale / renderedScaleRef.current
+      requestAnimationFrame(() => {
+        container.scrollLeft = contentX * newCssScale - cursorX
+        container.scrollTop = contentY * newCssScale - cursorY
+      })
     }
     container.addEventListener('wheel', handleWheel, { passive: false })
     return () => container.removeEventListener('wheel', handleWheel)
@@ -403,6 +467,7 @@ export default function PdfViewer() {
 
       {/* PDF view — always mounted, hidden when log is shown */}
       <div className="pdf-container" ref={containerRef} style={{ display: tab === 'pdf' ? undefined : 'none' }}>
+        <div className="pdf-wrapper" ref={wrapperRef} />
         {error && <div className="pdf-error">{error}</div>}
       </div>
 
