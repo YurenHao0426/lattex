@@ -360,6 +360,8 @@ export default function Editor() {
   }, [hoveredThreadId])
 
   // Ctrl+wheel / pinch zoom on editor (capture phase to beat CodeMirror)
+  const fontSizeRef = useRef(13.5)
+  const measureTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   useEffect(() => {
     const el = editorRef.current
     if (!el) return
@@ -367,20 +369,24 @@ export default function Editor() {
       if (!(e.ctrlKey || e.metaKey)) return
       e.preventDefault()
       e.stopPropagation()
-      const delta = e.deltaY > 0 ? -1 : 1
-      setEditorFontSize((s) => Math.min(28, Math.max(8, +(s + delta * 0.5).toFixed(1))))
+      // Use continuous delta for smooth feel
+      const delta = -e.deltaY * 0.02
+      const newSize = Math.min(28, Math.max(8, +(fontSizeRef.current + delta).toFixed(1)))
+      fontSizeRef.current = newSize
+      // Apply font size immediately to DOM for smooth feel
+      if (viewRef.current) {
+        viewRef.current.dom.style.fontSize = `${newSize}px`
+      }
+      // Debounce the expensive requestMeasure
+      if (measureTimerRef.current) clearTimeout(measureTimerRef.current)
+      measureTimerRef.current = setTimeout(() => {
+        if (viewRef.current) viewRef.current.requestMeasure()
+        setEditorFontSize(fontSizeRef.current)
+      }, 100)
     }
     el.addEventListener('wheel', handleWheel, { passive: false, capture: true })
     return () => el.removeEventListener('wheel', handleWheel, { capture: true })
   }, [])
-
-  // Apply font size to editor
-  useEffect(() => {
-    if (!viewRef.current) return
-    const wrapper = viewRef.current.dom
-    wrapper.style.fontSize = `${editorFontSize}px`
-    viewRef.current.requestMeasure()
-  }, [editorFontSize])
 
   if (!activeTab) {
     return (

@@ -120,8 +120,8 @@ ipcMain.handle('synctex:editFromPdf', async (_e, pdfPath: string, page: number, 
         if (syncDir && filePath.startsWith(syncDir)) {
           filePath = filePath.slice(syncDir.length).replace(/^\//, '')
         }
-        // Strip leading ./
-        if (filePath.startsWith('./')) filePath = filePath.slice(2)
+        // Normalize path: strip leading ./, collapse /./
+        filePath = filePath.replace(/\/\.\//g, '/').replace(/^\.\//, '')
         console.log(`[synctex] resolved: file=${filePath} line=${lineMatch[1]}`)
         resolve({ file: filePath, line: parseInt(lineMatch[1]) })
       } else {
@@ -1243,10 +1243,12 @@ ipcMain.handle('overleaf:serverCompile', async (_e, rootDocId?: string) => {
       stopOnFirstError: false
     })
 
+    console.log(`[compile] starting server compile for project ${projectId}`)
     const compileResult = await overleafFetch(
       `/project/${projectId}/compile?auto_compile=false`,
       { method: 'POST', body: compileBody }
     )
+    console.log(`[compile] compile response: ok=${compileResult.ok} status=${compileResult.status}`)
 
     if (!compileResult.ok) {
       sendToRenderer('latex:log', `Compile failed: HTTP ${compileResult.status}\n`)
@@ -1280,7 +1282,7 @@ ipcMain.handle('overleaf:serverCompile', async (_e, rootDocId?: string) => {
     const logFile = (data.outputFiles || []).find((f: any) => f.path === 'output.log')
     if (logFile) {
       try {
-        const logContent = await fetchBinary(buildOutputUrl(logFile))
+        const logContent = await fetchBinary(buildOutputUrl(logFile), overleafSessionCookie)
         sendToRenderer('latex:log', Buffer.from(logContent).toString('utf-8'))
       } catch (e) {
         sendToRenderer('latex:log', `[log fetch failed: ${e}]\n`)
@@ -1290,10 +1292,10 @@ ipcMain.handle('overleaf:serverCompile', async (_e, rootDocId?: string) => {
     // Grab synctex.gz (needed for PDF↔source navigation)
     const synctexFile = (data.outputFiles || []).find((f: any) => f.path === 'output.synctex.gz')
     if (synctexFile) {
+      // CDN returns 503 for non-PDF files; use Overleaf web proxy instead
+      const synctexUrl = `https://www.overleaf.com${synctexFile.url}?${params}`
       try {
-        const synctexUrl = buildOutputUrl(synctexFile)
-        console.log(`[compile] downloading synctex.gz from ${synctexUrl.slice(0, 80)}...`)
-        const d = await fetchBinary(synctexUrl)
+        const d = await fetchBinary(synctexUrl, overleafSessionCookie)
         await writeFile(join(buildDir, 'output.synctex.gz'), Buffer.from(d))
         console.log(`[compile] synctex.gz saved (${d.byteLength} bytes)`)
       } catch (e) {
@@ -1308,11 +1310,15 @@ ipcMain.handle('overleaf:serverCompile', async (_e, rootDocId?: string) => {
     const pdfFile = (data.outputFiles || []).find((f: any) => f.path === 'output.pdf')
     if (pdfFile) {
       try {
-        const pdfData = await fetchBinary(buildOutputUrl(pdfFile))
+        const pdfUrl = buildOutputUrl(pdfFile)
+        console.log(`[compile] downloading PDF from ${pdfUrl.slice(0, 100)}...`)
+        const pdfData = await fetchBinary(pdfUrl, overleafSessionCookie)
+        console.log(`[compile] PDF downloaded (${pdfData.byteLength} bytes)`)
         const pdfDest = join(buildDir, 'output.pdf')
         await writeFile(pdfDest, Buffer.from(pdfData))
         pdfPath = pdfDest
       } catch (e) {
+        console.log(`[compile] PDF direct download failed: ${e}`)
         sendToRenderer('latex:log', `\n[PDF download failed: ${e}]\n`)
       }
     }
@@ -1324,7 +1330,7 @@ ipcMain.handle('overleaf:serverCompile', async (_e, rootDocId?: string) => {
       if (refFile) {
         const pdfUrl = refFile.url.replace(/\/output\/[^/]+$/, '/output/output.pdf')
         try {
-          const pdfData = await fetchBinary(buildOutputUrl({ url: pdfUrl, build: refFile.build }))
+          const pdfData = await fetchBinary(buildOutputUrl({ url: pdfUrl, build: refFile.build }), overleafSessionCookie)
           if (pdfData.byteLength > 0) {
             const pdfDest = join(buildDir, 'output.pdf')
             await writeFile(pdfDest, Buffer.from(pdfData))
