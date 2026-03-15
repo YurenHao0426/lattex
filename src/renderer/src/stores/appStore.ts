@@ -57,6 +57,7 @@ interface AppState {
 
   // PDF
   pdfPath: string | null
+  pdfVersion: number
   setPdfPath: (p: string | null) => void
 
   // Compile
@@ -179,7 +180,8 @@ export const useAppStore = create<AppState>((set) => ({
   setMainDocument: (p) => set({ mainDocument: p }),
 
   pdfPath: null,
-  setPdfPath: (p) => set({ pdfPath: p }),
+  pdfVersion: 0,
+  setPdfPath: (p) => set((s) => ({ pdfPath: p, pdfVersion: s.pdfVersion + 1 })),
 
   compiling: false,
   setCompiling: (c) => set({ compiling: c }),
@@ -254,6 +256,7 @@ export const useAppStore = create<AppState>((set) => ({
     fileContents: {},
     mainDocument: null,
     pdfPath: null,
+    pdfVersion: 0,
     compileLog: '',
     compiling: false,
     showSearch: false,

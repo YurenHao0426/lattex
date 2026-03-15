@@ -282,6 +282,7 @@ export default function App() {
       useAppStore.getState().appendCompileLog(result.log)
     }
     if (result.pdfPath) {
+      useAppStore.getState().setPdfPath(null)
       useAppStore.getState().setPdfPath(result.pdfPath)
     }
     useAppStore.getState().setCompiling(false)

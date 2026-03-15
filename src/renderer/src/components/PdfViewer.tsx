@@ -127,7 +127,7 @@ function parseCompileLog(raw: string): LogEntry[] {
 type LogFilter = 'all' | 'error' | 'warning'
 
 export default function PdfViewer() {
-  const { pdfPath, compileLog, compiling } = useAppStore()
+  const { pdfPath, pdfVersion, compileLog, compiling } = useAppStore()
   const pendingPdfGoTo = useAppStore((s) => s.pendingPdfGoTo)
   const containerRef = useRef<HTMLDivElement>(null)  // scroll viewport
   const wrapperRef = useRef<HTMLDivElement>(null)    // inner wrapper (CSS transform target)
@@ -343,7 +343,7 @@ export default function PdfViewer() {
     } finally {
       renderingRef.current = false
     }
-  }, [pdfPath, renderScale, tab])
+  }, [pdfPath, pdfVersion, renderScale, tab])
 
   // Apply CSS transform on wrapper for instant visual zoom
   useEffect(() => {
