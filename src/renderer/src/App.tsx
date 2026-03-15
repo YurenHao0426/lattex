@@ -104,6 +104,13 @@ export default function App() {
       if (sync) sync.replaceContent(data.content)
     })
 
+    // Listen for new docs created locally (e.g. by Claude Code)
+    const unsubNewDoc = window.api.onSyncNewDoc((data) => {
+      if (data.docId) {
+        useAppStore.getState().addDocPath(data.docId, data.relPath)
+      }
+    })
+
     // Listen for remote cursor updates
     const unsubCursorUpdate = window.api.onCursorRemoteUpdate((raw) => {
       const data = raw as {
@@ -160,6 +167,7 @@ export default function App() {
       unsubState()
       unsubRejoined()
       unsubExternalEdit()
+      unsubNewDoc()
       unsubCursorUpdate()
       unsubCursorDisconnected()
       remoteCursors.clear()

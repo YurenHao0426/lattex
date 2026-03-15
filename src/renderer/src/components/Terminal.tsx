@@ -168,6 +168,77 @@ function QuickActions({ ptyId }: { ptyId: string }) {
     window.api.ptyWrite(ptyId, prompt + '\n')
   }
 
+  const copyComments = async () => {
+    const store = useAppStore.getState()
+    const projectId = store.overleafProjectId
+    if (!projectId) return
+
+    // Fetch threads and contexts in parallel
+    const [threadResult, ctxResult] = await Promise.all([
+      window.api.overleafGetThreads(projectId),
+      window.api.otFetchAllCommentContexts()
+    ])
+
+    const threads = (threadResult.success ? threadResult.threads : {}) as Record<string, {
+      messages: Array<{ content: string; timestamp?: number; user?: { first_name?: string; last_name?: string } }>
+      resolved?: boolean
+    }>
+    const contexts = ctxResult.success && ctxResult.contexts ? ctxResult.contexts : store.commentContexts
+
+    const lines: string[] = []
+    for (const [threadId, thread] of Object.entries(threads)) {
+      if (thread.resolved) continue
+      const ctx = contexts[threadId]
+      if (!ctx) continue
+      if (ctx.file !== activeTab) continue
+
+      const firstMsg = thread.messages?.[0]
+      if (!firstMsg) continue
+
+      // Compute line number and surrounding context from file content
+      const content = store.fileContents[ctx.file] || ''
+      let lineNum = 0
+      let contextSnippet = ctx.text
+      if (content) {
+        const before = content.slice(0, ctx.pos)
+        lineNum = (before.match(/\n/g) || []).length + 1
+        // Get the full line(s) containing the comment for context
+        const lineStart = before.lastIndexOf('\n') + 1
+        const afterComment = content.indexOf('\n', ctx.pos + ctx.text.length)
+        const lineEnd = afterComment === -1 ? content.length : afterComment
+        const fullLine = content.slice(lineStart, lineEnd).trim()
+        // Show full line with the commented text marked
+        if (fullLine.length > ctx.text.length) {
+          contextSnippet = fullLine.replace(ctx.text, `«${ctx.text}»`)
+        }
+      }
+
+      const fmtTime = (ts?: number) => ts ? new Date(ts).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : ''
+      const author = firstMsg.user ? [firstMsg.user.first_name, firstMsg.user.last_name].filter(Boolean).join(' ') : ''
+      const time = fmtTime(firstMsg.timestamp)
+      const attribution = [author, time].filter(Boolean).join(', ')
+      let line = `- ${ctx.file}:${lineNum}: ${contextSnippet}\n  → "${firstMsg.content}"${attribution ? ` — ${attribution}` : ''}`
+
+      // Add replies
+      for (let i = 1; i < thread.messages.length; i++) {
+        const reply = thread.messages[i]
+        const rAuthor = reply.user ? [reply.user.first_name, reply.user.last_name].filter(Boolean).join(' ') : ''
+        const rTime = fmtTime(reply.timestamp)
+        const rAttribution = [rAuthor, rTime].filter(Boolean).join(', ')
+        line += `\n  → "${reply.content}"${rAttribution ? ` — ${rAttribution}` : ''}`
+      }
+      lines.push(line)
+    }
+
+    if (lines.length === 0) {
+      navigator.clipboard.writeText('No unresolved comments.')
+      return
+    }
+
+    const text = `Overleaf comments (${lines.length} unresolved):\n\n${lines.join('\n\n')}`
+    navigator.clipboard.writeText(text)
+  }
+
   const actions = [
     {
       label: 'Fix Errors',
@@ -193,6 +264,10 @@ function QuickActions({ ptyId }: { ptyId: string }) {
           send(`Explain the structure and content of: ${activeTab}`)
         }
       }
+    },
+    {
+      label: 'Copy Comments',
+      action: copyComments
     }
   ]
 

@@ -149,6 +149,11 @@ const api = {
   },
   syncContentChanged: (docId: string, content: string) =>
     ipcRenderer.invoke('sync:contentChanged', docId, content),
+  onSyncNewDoc: (cb: (data: { docId: string | null; relPath: string }) => void) => {
+    const handler = (_e: Electron.IpcRendererEvent, data: { docId: string | null; relPath: string }) => cb(data)
+    ipcRenderer.on('sync:newDoc', handler)
+    return () => ipcRenderer.removeListener('sync:newDoc', handler)
+  },
 
   // Cursor tracking
   cursorUpdate: (docId: string, row: number, column: number) =>

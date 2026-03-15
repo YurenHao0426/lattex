@@ -82,6 +82,7 @@ interface AppState {
   docPathMap: Record<string, string>   // docId → relativePath
   pathDocMap: Record<string, string>   // relativePath → docId
   setDocMaps: (docPath: Record<string, string>, pathDoc: Record<string, string>) => void
+  addDocPath: (docId: string, relPath: string) => void
   docVersions: Record<string, number>  // docId → version
   setDocVersion: (docId: string, version: number) => void
   overleafProject: { name: string; rootDocId: string } | null
@@ -191,6 +192,10 @@ export const useAppStore = create<AppState>((set) => ({
   docPathMap: {},
   pathDocMap: {},
   setDocMaps: (docPath, pathDoc) => set({ docPathMap: docPath, pathDocMap: pathDoc }),
+  addDocPath: (docId, relPath) => set((s) => ({
+    docPathMap: { ...s.docPathMap, [docId]: relPath },
+    pathDocMap: { ...s.pathDocMap, [relPath]: docId }
+  })),
   docVersions: {},
   setDocVersion: (docId, version) =>
     set((s) => ({ docVersions: { ...s.docVersions, [docId]: version } })),

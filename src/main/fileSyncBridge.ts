@@ -3,7 +3,7 @@
 
 // Bidirectional file sync bridge: temp dir ↔ Overleaf via OT (text) + REST (binary)
 import { join, dirname } from 'path'
-import { readFile, writeFile, mkdir, unlink, rename as fsRename, appendFile } from 'fs/promises'
+import { readFile, writeFile, mkdir, unlink, rename as fsRename, appendFile, readdir } from 'fs/promises'
 import { createHash } from 'crypto'
 import * as chokidar from 'chokidar'
 import { diff_match_patch } from 'diff-match-patch'
@@ -22,6 +22,20 @@ function bridgeLog(msg: string) {
   appendFile(LOG_FILE, line + '\n').catch(() => {})
 }
 
+const TEXT_EXTENSIONS = new Set([
+  'tex', 'bib', 'bst', 'cls', 'sty', 'dtx', 'ins', 'fd', 'def', 'cfg',
+  'lbx', 'cbx', 'bbx', 'clo', 'lco', 'tikz', 'txt', 'md', 'py', 'r',
+  'm', 'lua', 'sh', 'yml', 'yaml', 'json', 'xml', 'csv', 'tsv', 'html',
+  'css', 'js', 'ts', 'c', 'cpp', 'h', 'hpp', 'java', 'rb', 'pl', 'mk', 'bbl'
+])
+
+function isTextExtension(relPath: string): boolean {
+  const name = relPath.split('/').pop()?.toLowerCase() || ''
+  if (name === 'makefile' || name === 'latexmkrc') return true
+  const ext = name.split('.').pop() || ''
+  return TEXT_EXTENSIONS.has(ext)
+}
+
 export class FileSyncBridge {
   private lastKnownContent = new Map<string, string>()   // relPath → content (text docs)
   private binaryHashes = new Map<string, string>()        // relPath → sha1 hash (binary files)
@@ -29,6 +43,8 @@ export class FileSyncBridge {
   private debounceTimers = new Map<string, ReturnType<typeof setTimeout>>()
   private otClients = new Map<string, OtClient>()         // docId → OtClient (non-editor docs)
   private editorDocs = new Set<string>()                  // docIds owned by renderer
+  private pendingCreates = new Set<string>()              // relPaths being created on Overleaf
+  private createdFolders = new Map<string, string>()      // dirPath → folderId cache
   private watcher: chokidar.FSWatcher | null = null
 
   private socket: OverleafSocket
@@ -128,6 +144,8 @@ export class FileSyncBridge {
 
     this.watcher.on('ready', () => {
       bridgeLog(`[FileSyncBridge] chokidar ready, watching ${this.tmpDir}`)
+      // Scan for files that exist on disk but not on Overleaf (e.g. from previous failed sync)
+      this.scanForOrphanedFiles()
     })
 
     this.watcher.on('change', (absPath: string) => {
@@ -139,9 +157,12 @@ export class FileSyncBridge {
     this.watcher.on('add', (absPath: string) => {
       const relPath = absPath.replace(this.tmpDir + '/', '')
       bridgeLog(`[FileSyncBridge] chokidar add: ${relPath}`)
-      // Process if it's a known doc or fileRef
       if (this.pathDocMap[relPath] || this.pathFileRefMap[relPath]) {
+        // Known file — process as change
         this.onFileChanged(relPath)
+      } else if (!this.pendingCreates.has(relPath)) {
+        // New local file — create on Overleaf
+        this.onNewLocalFile(relPath)
       }
     })
 
@@ -179,6 +200,8 @@ export class FileSyncBridge {
     this.binaryHashes.clear()
     this.writesInProgress.clear()
     this.editorDocs.clear()
+    this.pendingCreates.clear()
+    this.createdFolders.clear()
 
     console.log('[FileSyncBridge] stopped')
   }
@@ -251,6 +274,12 @@ export class FileSyncBridge {
     const folderPath = this.findFolderPath(folderId)
     const relPath = folderPath + fileRef.name
 
+    // Skip if we just created this file locally
+    if (this.pendingCreates.has(relPath)) {
+      bridgeLog(`[FileSyncBridge] skipping reciveNewFile for ${relPath} (we created it)`)
+      return
+    }
+
     bridgeLog(`[FileSyncBridge] remote new file: ${relPath} (${fileRef._id})`)
 
     // Register in maps
@@ -272,6 +301,12 @@ export class FileSyncBridge {
 
     const folderPath = this.findFolderPath(folderId)
     const relPath = folderPath + doc.name
+
+    // Skip if we just created this doc locally
+    if (this.pendingCreates.has(relPath)) {
+      bridgeLog(`[FileSyncBridge] skipping reciveNewDoc for ${relPath} (we created it)`)
+      return
+    }
 
     bridgeLog(`[FileSyncBridge] remote new doc: ${relPath} (${doc._id})`)
 
@@ -377,30 +412,28 @@ export class FileSyncBridge {
     }
   }
 
-  /** Find folder path prefix from folderId by looking at existing paths */
+  /** Find folder path prefix from folderId */
   private findFolderPath(folderId: string): string {
-    // Check doc paths to find a doc in this folder
-    for (const relPath of Object.values(this.docPathMap)) {
-      // Not a reliable method — fall back to root
-    }
-    // Check fileRef paths
-    for (const relPath of Object.values(this.fileRefPathMap)) {
-      // Not reliable either
-    }
-    // For root folder, return empty
-    // For subfolders, we'd need the folder tree — but we can look for folder paths
-    // ending with the folderId in the socket's project data
     const projectData = this.socket.projectData
     if (projectData) {
-      const path = this.findFolderPathInTree(projectData.project.rootFolder, folderId, '')
-      if (path !== null) return path
+      const rootFolder = projectData.project.rootFolder?.[0]
+      if (rootFolder) {
+        // Root folder itself → empty prefix
+        if (rootFolder._id === folderId) return ''
+        // Search children (skip root folder name to match walkRootFolder behavior)
+        const subFolders = rootFolder.folders as Array<{ _id: string; name: string; folders?: unknown[] }> | undefined
+        if (subFolders) {
+          const path = this.findFolderPathInTree(subFolders, folderId, '')
+          if (path !== null) return path
+        }
+      }
     }
-    return '' // default to root
+    return ''
   }
 
   private findFolderPathInTree(folders: Array<{ _id: string; name: string; folders?: unknown[] }>, targetId: string, prefix: string): string | null {
     for (const f of folders) {
-      if (f._id === targetId) return prefix
+      if (f._id === targetId) return prefix ? prefix + f.name + '/' : f.name + '/'
       const sub = f.folders as Array<{ _id: string; name: string; folders?: unknown[] }> | undefined
       if (sub) {
         const subPrefix = prefix ? prefix + f.name + '/' : f.name + '/'
@@ -559,9 +592,9 @@ export class FileSyncBridge {
     })
   }
 
-  private async uploadBinary(relPath: string, fileData: Buffer): Promise<void> {
+  private async uploadBinary(relPath: string, fileData: Buffer, overrideFolderId?: string): Promise<void> {
     const fileName = relPath.includes('/') ? relPath.split('/').pop()! : relPath
-    const folderId = this.findFolderIdForPath(relPath)
+    const folderId = overrideFolderId || this.findFolderIdForPath(relPath)
 
     const ext = fileName.split('.').pop()?.toLowerCase() || ''
     const mimeMap: Record<string, string> = {
@@ -627,22 +660,21 @@ export class FileSyncBridge {
 
   /** Find the folder ID for a given relPath */
   private findFolderIdForPath(relPath: string): string {
-    const dir = dirname(relPath)
-    if (dir === '.') {
-      // Root folder
-      const projectData = this.socket.projectData
-      return projectData?.project.rootFolder?.[0]?._id || ''
-    }
-
-    // Search project data for the folder
     const projectData = this.socket.projectData
+    const rootId = projectData?.project.rootFolder?.[0]?._id || ''
+    const dir = dirname(relPath)
+    if (dir === '.') return rootId
+
+    // Search inside root folder's children (skip root folder name)
     if (projectData) {
-      const folderId = this.findFolderIdInTree(projectData.project.rootFolder, dir + '/', '')
-      if (folderId) return folderId
+      const subFolders = projectData.project.rootFolder?.[0]?.folders as Array<{ _id: string; name: string; folders?: unknown[] }> | undefined
+      if (subFolders) {
+        const folderId = this.findFolderIdInTree(subFolders, dir + '/', '')
+        if (folderId) return folderId
+      }
     }
 
-    // Fallback to root
-    return projectData?.project.rootFolder?.[0]?._id || ''
+    return rootId
   }
 
   private findFolderIdInTree(folders: Array<{ _id: string; name: string; folders?: unknown[] }>, targetPath: string, prefix: string): string | null {
@@ -774,6 +806,234 @@ export class FileSyncBridge {
       this.writesInProgress.delete(newRelPath)
     }, 150)
   }
+
+  // ── New local file creation ──────────────────────────────────
+
+  /** Scan temp dir for files not known to Overleaf (orphaned from previous sessions) */
+  private async scanForOrphanedFiles(): Promise<void> {
+    const walk = async (dir: string, prefix: string): Promise<string[]> => {
+      const entries = await readdir(dir, { withFileTypes: true }).catch(() => [])
+      const results: string[] = []
+      for (const entry of entries) {
+        if (entry.name.startsWith('.')) continue
+        const relPath = prefix ? prefix + '/' + entry.name : entry.name
+        if (entry.isDirectory()) {
+          results.push(...await walk(join(dir, entry.name), relPath))
+        } else {
+          results.push(relPath)
+        }
+      }
+      return results
+    }
+
+    const allFiles = await walk(this.tmpDir, '')
+    let orphanCount = 0
+
+    for (const relPath of allFiles) {
+      if (this.pathDocMap[relPath] || this.pathFileRefMap[relPath]) continue
+      // Skip LaTeX output files
+      if (/\.(aux|log|fls|fdb_latexmk|synctex\.gz|bbl|blg|out|toc|lof|lot|nav|snm|vrb|pdf|synctex)/.test(relPath)) continue
+      if (/(^|[/\\])\./.test(relPath)) continue
+
+      bridgeLog(`[FileSyncBridge] orphaned file found: ${relPath}`)
+      this.onNewLocalFile(relPath)
+      orphanCount++
+    }
+
+    if (orphanCount > 0) {
+      bridgeLog(`[FileSyncBridge] found ${orphanCount} orphaned files to sync`)
+    }
+  }
+
+  /** Debounce handler for new local files */
+  private onNewLocalFile(relPath: string): void {
+    if (this.stopped) return
+    if (this.writesInProgress.has(relPath)) return
+
+    // Skip LaTeX output files and dotfiles (same as chokidar ignored)
+    if (/\.(aux|log|fls|fdb_latexmk|synctex\.gz|bbl|blg|out|toc|lof|lot|nav|snm|vrb)$/.test(relPath)) return
+    if (/(^|[/\\])\./.test(relPath)) return
+
+    // Debounce 1s to let the tool finish writing
+    const key = 'new:' + relPath
+    const existing = this.debounceTimers.get(key)
+    if (existing) clearTimeout(existing)
+
+    this.debounceTimers.set(key, setTimeout(() => {
+      this.debounceTimers.delete(key)
+      this.processNewFile(relPath)
+    }, 1000))
+  }
+
+  private async processNewFile(relPath: string): Promise<void> {
+    if (this.stopped) return
+    // Double-check it's still unknown (might have been registered by a server event)
+    if (this.pathDocMap[relPath] || this.pathFileRefMap[relPath]) return
+
+    this.pendingCreates.add(relPath)
+
+    try {
+      if (isTextExtension(relPath)) {
+        await this.createLocalDocOnOverleaf(relPath)
+      } else {
+        await this.uploadNewLocalBinary(relPath)
+      }
+    } catch (e) {
+      bridgeLog(`[FileSyncBridge] failed to create ${relPath} on Overleaf: ${e}`)
+    } finally {
+      // Keep in pendingCreates briefly to avoid processing the echoed server event
+      setTimeout(() => this.pendingCreates.delete(relPath), 5000)
+    }
+  }
+
+  /** Create a text doc on Overleaf and sync its content */
+  private async createLocalDocOnOverleaf(relPath: string): Promise<void> {
+    const content = await readFile(join(this.tmpDir, relPath), 'utf-8')
+    const dir = dirname(relPath)
+    const fileName = relPath.split('/').pop()!
+
+    // Ensure parent folder exists
+    const folderId = await this.ensureFolderExists(dir === '.' ? '' : dir)
+
+    // Create doc via REST API
+    const result = await this.overleafPost(`/project/${this.projectId}/doc`, {
+      name: fileName,
+      parent_folder_id: folderId
+    })
+
+    if (!result.ok || !result.data?._id) {
+      throw new Error(`Create doc failed: HTTP ${result.status} ${JSON.stringify(result.data)}`)
+    }
+
+    const docId = result.data._id as string
+    bridgeLog(`[FileSyncBridge] created doc "${relPath}" (${docId}) on Overleaf`)
+
+    // Update maps
+    this.docPathMap[docId] = relPath
+    this.pathDocMap[relPath] = docId
+
+    // Join the doc
+    const joinResult = await this.socket.joinDoc(docId)
+    const serverContent = (joinResult.docLines || []).join('\n')
+
+    // Create OT client
+    const otClient = new OtClient(
+      joinResult.version,
+      (ops, version) => this.sendOps(docId, ops, version),
+      (ops) => this.onRemoteApply(docId, ops)
+    )
+    this.otClients.set(docId, otClient)
+
+    // Send content as OT ops (doc starts empty on server)
+    if (content && content !== serverContent) {
+      this.lastKnownContent.set(relPath, content)
+      const diffs = dmp.diff_main(serverContent, content)
+      dmp.diff_cleanupEfficiency(diffs)
+      const ops = diffsToOtOps(diffs)
+
+      if (ops.length > 0) {
+        otClient.onLocalOps(ops)
+      }
+    } else {
+      this.lastKnownContent.set(relPath, serverContent)
+    }
+
+    // Notify renderer about the new doc
+    this.mainWindow.webContents.send('sync:newDoc', { docId, relPath })
+  }
+
+  /** Upload a new binary file to Overleaf */
+  private async uploadNewLocalBinary(relPath: string): Promise<void> {
+    const fullPath = join(this.tmpDir, relPath)
+    const fileData = await readFile(fullPath)
+    const dir = dirname(relPath)
+
+    const folderId = await this.ensureFolderExists(dir === '.' ? '' : dir)
+
+    bridgeLog(`[FileSyncBridge] uploading new binary: ${relPath} (${fileData.length} bytes)`)
+    await this.uploadBinary(relPath, fileData, folderId)
+    this.binaryHashes.set(relPath, createHash('sha1').update(fileData).digest('hex'))
+
+    // Notify renderer
+    this.mainWindow.webContents.send('sync:newDoc', { docId: null, relPath })
+  }
+
+  /** Ensure a folder path exists on Overleaf, creating intermediaries as needed */
+  private async ensureFolderExists(dirPath: string): Promise<string> {
+    if (!dirPath || dirPath === '.') {
+      return this.socket.projectData?.project.rootFolder?.[0]?._id || ''
+    }
+
+    // Check cache
+    const cached = this.createdFolders.get(dirPath)
+    if (cached) return cached
+
+    // Check project data — search inside root folder's children
+    const projectData = this.socket.projectData
+    if (projectData) {
+      const subFolders = projectData.project.rootFolder?.[0]?.folders as Array<{ _id: string; name: string; folders?: unknown[] }> | undefined
+      if (subFolders) {
+        const folderId = this.findFolderIdInTree(subFolders, dirPath + '/', '')
+        if (folderId) {
+          this.createdFolders.set(dirPath, folderId)
+          return folderId
+        }
+      }
+    }
+
+    // Create — ensure parent exists first
+    const parts = dirPath.split('/')
+    const parentDir = parts.slice(0, -1).join('/')
+    const folderName = parts[parts.length - 1]
+
+    const parentId = await this.ensureFolderExists(parentDir)
+
+    const result = await this.overleafPost(`/project/${this.projectId}/folder`, {
+      name: folderName,
+      parent_folder_id: parentId
+    })
+
+    if (result.ok && result.data?._id) {
+      const folderId = result.data._id as string
+      this.createdFolders.set(dirPath, folderId)
+      bridgeLog(`[FileSyncBridge] created folder "${folderName}" (${folderId})`)
+      return folderId
+    }
+
+    throw new Error(`Failed to create folder "${dirPath}": HTTP ${result.status}`)
+  }
+
+  /** POST to Overleaf REST API */
+  private overleafPost(path: string, body: object): Promise<{ ok: boolean; data?: any; status: number }> {
+    return new Promise((resolve, reject) => {
+      const req = net.request({
+        method: 'POST',
+        url: `https://www.overleaf.com${path}`
+      })
+      req.setHeader('Cookie', this.cookie)
+      req.setHeader('Content-Type', 'application/json')
+      req.setHeader('Accept', 'application/json')
+      if (this.csrfToken) req.setHeader('x-csrf-token', this.csrfToken)
+
+      let resBody = ''
+      req.on('response', (res) => {
+        res.on('data', (chunk: Buffer) => { resBody += chunk.toString() })
+        res.on('end', () => {
+          try {
+            const data = JSON.parse(resBody)
+            resolve({ ok: (res.statusCode || 0) >= 200 && (res.statusCode || 0) < 300, data, status: res.statusCode || 0 })
+          } catch {
+            resolve({ ok: false, status: res.statusCode || 0 })
+          }
+        })
+      })
+      req.on('error', reject)
+      req.write(JSON.stringify(body))
+      req.end()
+    })
+  }
+
+  // ── Public getters ─────────────────────────────────────────────
 
   /** Get the temp dir path */
   get dir(): string {
