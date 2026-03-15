@@ -41,6 +41,12 @@ const api = {
   // SyncTeX
   synctexEdit: (pdfPath: string, page: number, x: number, y: number) =>
     ipcRenderer.invoke('synctex:editFromPdf', pdfPath, page, x, y) as Promise<{ file: string; line: number } | null>,
+  synctexView: (line: number, col: number, relPath: string) =>
+    ipcRenderer.invoke('synctex:viewFromSource', line, col, relPath) as Promise<{ page: number; x: number; y: number; h: number; v: number; W: number; H: number } | null>,
+
+  // Multi-file search
+  searchFiles: (query: string, caseSensitive: boolean) =>
+    ipcRenderer.invoke('search:files', query, caseSensitive) as Promise<Array<{ file: string; line: number; content: string; col: number }>>,
 
   // Overleaf web session (comments)
   overleafWebLogin: () => ipcRenderer.invoke('overleaf:webLogin') as Promise<{ success: boolean }>,

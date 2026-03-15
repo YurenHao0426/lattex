@@ -7,7 +7,7 @@ import { EditorState } from '@codemirror/state'
 import { defaultKeymap, history, historyKeymap, indentWithTab } from '@codemirror/commands'
 import { bracketMatching, foldGutter, indentOnInput, StreamLanguage, syntaxHighlighting, HighlightStyle } from '@codemirror/language'
 import { closeBrackets, closeBracketsKeymap, completionKeymap } from '@codemirror/autocomplete'
-import { searchKeymap, highlightSelectionMatches } from '@codemirror/search'
+import { search, searchKeymap, highlightSelectionMatches } from '@codemirror/search'
 import { stex } from '@codemirror/legacy-modes/mode/stex'
 import { tags } from '@lezer/highlight'
 import { useAppStore } from '../stores/appStore'
@@ -239,6 +239,7 @@ export default function Editor() {
         foldGutter(),
         history(),
         highlightSelectionMatches(),
+        search({ top: true }),
         StreamLanguage.define(stex),
         syntaxHighlighting(cosmicLatteHighlight),
         keymap.of([

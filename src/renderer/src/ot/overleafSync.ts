@@ -36,6 +36,10 @@ export class OverleafDocSync {
     return this.otClient.version
   }
 
+  get editorView(): EditorView | null {
+    return this.view
+  }
+
   setView(view: EditorView) {
     this.view = view
   }

@@ -14,6 +14,7 @@ import PdfViewer from './components/PdfViewer'
 import Terminal from './components/Terminal'
 import ReviewPanel from './components/ReviewPanel'
 import ChatPanel from './components/ChatPanel'
+import SearchPanel from './components/SearchPanel'
 import StatusBar from './components/StatusBar'
 import type { OverleafDocSync } from './ot/overleafSync'
 import { colorForUser, type RemoteCursor } from './extensions/remoteCursors'
@@ -49,6 +50,7 @@ export default function App() {
     showFileTree,
     showReviewPanel,
     showChat,
+    showSearch,
   } = useAppStore()
 
   const [checkingSession, setCheckingSession] = useState(true)
@@ -206,11 +208,38 @@ export default function App() {
           e.preventDefault()
           useAppStore.getState().toggleTerminal()
         }
+        if (e.key === 'Enter') {
+          e.preventDefault()
+          handleForwardSearch()
+        }
+        if (e.key === 'f' && e.shiftKey) {
+          e.preventDefault()
+          useAppStore.getState().toggleSearch()
+        }
       }
     }
     window.addEventListener('keydown', handler)
     return () => window.removeEventListener('keydown', handler)
   }, [screen])
+
+  const handleForwardSearch = async () => {
+    const state = useAppStore.getState()
+    const activeTab = state.activeTab
+    if (!activeTab) return
+    // Get cursor line from the active editor view
+    const docId = state.pathDocMap[activeTab]
+    const sync = docId ? activeDocSyncs.get(docId) : null
+    const view = sync?.editorView
+    if (!view) return
+    const cursor = view.state.selection.main.head
+    const line = view.state.doc.lineAt(cursor)
+    const lineNum = line.number
+    const col = cursor - line.from
+    const result = await window.api.synctexView(lineNum, col, activeTab)
+    if (result) {
+      state.setPendingPdfGoTo({ page: result.page, y: result.v })
+    }
+  }
 
   const handleCompile = async () => {
     const state = useAppStore.getState()
@@ -383,13 +412,17 @@ export default function App() {
         <Toolbar onCompile={handleCompile} onLocalCompile={handleLocalCompile} onBack={handleBackToProjects} />
         <div className="main-content">
           <PanelGroup direction="horizontal">
-            {showFileTree && (
+            {(showFileTree || showSearch) && (
               <>
                 <Panel defaultSize={18} minSize={12} maxSize={35}>
-                  <div className="sidebar-panel">
-                    <FileTree />
-                    <OutlineView />
-                  </div>
+                  {showSearch ? (
+                    <SearchPanel />
+                  ) : (
+                    <div className="sidebar-panel">
+                      <FileTree />
+                      <OutlineView />
+                    </div>
+                  )}
                 </Panel>
                 <PanelResizeHandle className="resize-handle resize-handle-h" />
               </>

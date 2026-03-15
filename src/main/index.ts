@@ -2,8 +2,8 @@
 // Licensed under AGPL-3.0 - see LICENSE file
 
 import { app, BrowserWindow, ipcMain, dialog, shell, net } from 'electron'
-import { join, basename } from 'path'
-import { readFile, writeFile, mkdir as mkdirAsync, unlink } from 'fs/promises'
+import { join, basename, relative, extname } from 'path'
+import { readFile, writeFile, mkdir as mkdirAsync, unlink, readdir, stat } from 'fs/promises'
 import { spawn } from 'child_process'
 import * as pty from 'node-pty'
 import { OverleafSocket, type RootFolder, type SubFolder, type JoinDocResult } from './overleafSocket'
@@ -134,6 +134,106 @@ ipcMain.handle('synctex:editFromPdf', async (_e, pdfPath: string, page: number, 
       resolve(null)
     })
   })
+})
+
+// SyncTeX: source file:line → PDF page/position (forward search)
+ipcMain.handle('synctex:viewFromSource', async (_e, line: number, col: number, relPath: string) => {
+  const syncDir = compilationManager?.dir
+  if (!syncDir) return null
+  // Look for build dir output.pdf
+  const buildDir = join(syncDir, '.build')
+  const pdfPath = join(buildDir, 'output.pdf')
+  const filePath = join(syncDir, relPath)
+  const input = `${line}:${col}:${filePath}`
+  console.log(`[synctex] view -i ${input} -o ${pdfPath}`)
+  return new Promise<{ page: number; x: number; y: number; h: number; v: number; W: number; H: number } | null>((resolve) => {
+    const proc = spawn('synctex', ['view', '-i', input, '-o', pdfPath], {
+      env: process.env,
+      cwd: syncDir
+    })
+    let stdout = ''
+    let stderr = ''
+    proc.stdout?.on('data', (d) => { stdout += d.toString() })
+    proc.stderr?.on('data', (d) => { stderr += d.toString() })
+    proc.on('close', (code) => {
+      console.log(`[synctex] view exit=${code} stdout=${stdout.slice(0, 300)} stderr=${stderr.slice(0, 200)}`)
+      const pageMatch = stdout.match(/Page:(\d+)/)
+      const xMatch = stdout.match(/x:([0-9.]+)/)
+      const yMatch = stdout.match(/y:([0-9.]+)/)
+      const hMatch = stdout.match(/h:([0-9.]+)/)
+      const vMatch = stdout.match(/v:([0-9.]+)/)
+      const wMatch = stdout.match(/W:([0-9.]+)/)
+      const hMatch2 = stdout.match(/H:([0-9.]+)/)
+      if (pageMatch) {
+        resolve({
+          page: parseInt(pageMatch[1]),
+          x: xMatch ? parseFloat(xMatch[1]) : 0,
+          y: yMatch ? parseFloat(yMatch[1]) : 0,
+          h: hMatch ? parseFloat(hMatch[1]) : 0,
+          v: vMatch ? parseFloat(vMatch[1]) : 0,
+          W: wMatch ? parseFloat(wMatch[1]) : 0,
+          H: hMatch2 ? parseFloat(hMatch2[1]) : 0
+        })
+      } else {
+        resolve(null)
+      }
+    })
+    proc.on('error', (err) => {
+      console.log(`[synctex] view spawn error: ${err.message}`)
+      resolve(null)
+    })
+  })
+})
+
+// ── Multi-file search ────────────────────────────────────────────
+
+const TEXT_EXTS = new Set(['.tex', '.bib', '.sty', '.cls', '.bst', '.txt', '.md', '.cfg', '.def', '.dtx', '.ins', '.ltx'])
+
+async function walkDir(dir: string, base: string): Promise<string[]> {
+  const results: string[] = []
+  const entries = await readdir(dir, { withFileTypes: true })
+  for (const entry of entries) {
+    if (entry.name.startsWith('.')) continue
+    const full = join(dir, entry.name)
+    if (entry.isDirectory()) {
+      results.push(...await walkDir(full, base))
+    } else if (TEXT_EXTS.has(extname(entry.name).toLowerCase())) {
+      results.push(relative(base, full))
+    }
+  }
+  return results
+}
+
+ipcMain.handle('search:files', async (_e, query: string, caseSensitive: boolean) => {
+  const syncDir = compilationManager?.dir
+  if (!syncDir || !query) return []
+
+  const files = await walkDir(syncDir, syncDir)
+  const results: Array<{ file: string; line: number; content: string; col: number }> = []
+  const flags = caseSensitive ? 'g' : 'gi'
+  let regex: RegExp
+  try {
+    regex = new RegExp(query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), flags)
+  } catch {
+    return []
+  }
+
+  for (const relPath of files) {
+    if (results.length >= 200) break
+    try {
+      const content = await readFile(join(syncDir, relPath), 'utf-8')
+      const lines = content.split('\n')
+      for (let i = 0; i < lines.length; i++) {
+        if (results.length >= 200) break
+        const match = regex.exec(lines[i])
+        if (match) {
+          results.push({ file: relPath, line: i + 1, content: lines[i].trim().slice(0, 200), col: match.index })
+          regex.lastIndex = 0 // reset for next line
+        }
+      }
+    } catch { /* skip unreadable files */ }
+  }
+  return results
 })
 
 // ── Terminal / PTY ───────────────────────────────────────────────

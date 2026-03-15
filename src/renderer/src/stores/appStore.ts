@@ -94,6 +94,10 @@ interface AppState {
   syncDir: string
   setSyncDir: (dir: string) => void
 
+  // Search panel
+  showSearch: boolean
+  toggleSearch: () => void
+
   // Review panel
   showReviewPanel: boolean
   toggleReviewPanel: () => void
@@ -121,6 +125,8 @@ interface AppState {
   // Navigation
   pendingGoTo: { file: string; line?: number; pos?: number; highlight?: string } | null
   setPendingGoTo: (g: { file: string; line?: number; pos?: number; highlight?: string } | null) => void
+  pendingPdfGoTo: { page: number; y: number } | null
+  setPendingPdfGoTo: (g: { page: number; y: number } | null) => void
 
   // Status
   statusMessage: string
@@ -210,6 +216,9 @@ export const useAppStore = create<AppState>((set) => ({
   syncDir: '',
   setSyncDir: (dir) => set({ syncDir: dir }),
 
+  showSearch: false,
+  toggleSearch: () => set((s) => ({ showSearch: !s.showSearch })),
+
   showReviewPanel: false,
   toggleReviewPanel: () => set((s) => ({ showReviewPanel: !s.showReviewPanel })),
 
@@ -232,6 +241,8 @@ export const useAppStore = create<AppState>((set) => ({
 
   pendingGoTo: null,
   setPendingGoTo: (g) => set({ pendingGoTo: g }),
+  pendingPdfGoTo: null,
+  setPendingPdfGoTo: (g) => set({ pendingPdfGoTo: g }),
 
   statusMessage: 'Ready',
   setStatusMessage: (m) => set({ statusMessage: m }),
@@ -245,6 +256,7 @@ export const useAppStore = create<AppState>((set) => ({
     pdfPath: null,
     compileLog: '',
     compiling: false,
+    showSearch: false,
     overleafProjectId: null,
     connectionState: 'disconnected',
     docPathMap: {},
@@ -260,6 +272,7 @@ export const useAppStore = create<AppState>((set) => ({
     hoveredThreadId: null,
     focusedThreadId: null,
     pendingGoTo: null,
+    pendingPdfGoTo: null,
     statusMessage: 'Ready',
     showChat: false,
     onlineUsersCount: 0

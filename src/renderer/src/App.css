@@ -349,6 +349,115 @@ html, body, #root {
   min-height: 0;
 }
 
+/* ── Search Panel ────────────────────────────────────────────── */
+
+.search-panel {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-secondary);
+}
+
+.search-panel-header {
+  padding: 8px;
+  border-bottom: 1px solid var(--border);
+}
+
+.search-input-row {
+  display: flex;
+  gap: 4px;
+}
+
+.search-input {
+  flex: 1;
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  padding: 5px 8px;
+  outline: none;
+}
+
+.search-input:focus {
+  border-color: var(--accent-blue);
+}
+
+.search-case-btn {
+  background: var(--bg-hover);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 6px;
+  cursor: pointer;
+}
+
+.search-case-btn.active {
+  background: var(--accent-blue);
+  color: white;
+  border-color: var(--accent-blue);
+}
+
+.search-status {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-top: 4px;
+  padding: 0 2px;
+}
+
+.search-results {
+  flex: 1;
+  overflow-y: auto;
+  min-height: 0;
+}
+
+.search-file-group {
+  border-bottom: 1px solid var(--border);
+}
+
+.search-file-name {
+  padding: 4px 8px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--accent);
+  background: var(--bg-tertiary);
+  position: sticky;
+  top: 0;
+  z-index: 1;
+}
+
+.search-result-item {
+  display: flex;
+  gap: 8px;
+  padding: 3px 8px 3px 16px;
+  font-size: 12px;
+  font-family: var(--font-mono);
+  cursor: pointer;
+  align-items: baseline;
+}
+
+.search-result-item:hover {
+  background: var(--bg-hover);
+}
+
+.search-result-line {
+  color: var(--text-muted);
+  font-size: 10px;
+  min-width: 28px;
+  text-align: right;
+  flex-shrink: 0;
+}
+
+.search-result-content {
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 /* ── File Tree ───────────────────────────────────────────────── */
 
 .file-tree {
@@ -1271,6 +1380,61 @@ html, body, #root {
   height: 100%;
 }
 
+/* CodeMirror search panel — Cosmic Latte theme */
+.cm-editor .cm-search {
+  background: var(--bg-secondary);
+  border-bottom: 1px solid var(--border);
+  padding: 4px 8px;
+  font-family: var(--font-sans);
+  font-size: 12px;
+  color: var(--text-primary);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  align-items: center;
+}
+.cm-editor .cm-search input,
+.cm-editor .cm-search select {
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  padding: 2px 6px;
+  outline: none;
+}
+.cm-editor .cm-search input:focus {
+  border-color: var(--accent-blue);
+}
+.cm-editor .cm-search button {
+  background: var(--bg-hover);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  font-size: 11px;
+  padding: 2px 8px;
+  cursor: pointer;
+}
+.cm-editor .cm-search button:hover {
+  background: var(--bg-active);
+}
+.cm-editor .cm-search label {
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+.cm-editor .cm-search .cm-button {
+  background: var(--bg-hover);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+.cm-editor .cm-searchMatch {
+  background: rgba(184, 134, 11, 0.3);
+}
+.cm-editor .cm-searchMatch-selected {
+  background: rgba(184, 134, 11, 0.6);
+}
+
 /* ── PDF Viewer ──────────────────────────────────────────────── */
 
 .pdf-panel {
@@ -1325,6 +1489,38 @@ html, body, #root {
   font-size: 11px;
   color: var(--text-muted);
   min-width: 40px;
+  text-align: center;
+}
+
+.pdf-search-bar {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 8px;
+  background: var(--bg-secondary);
+  border-bottom: 1px solid var(--border);
+}
+
+.pdf-search-input {
+  flex: 1;
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  font-family: var(--font-sans);
+  font-size: 12px;
+  padding: 3px 8px;
+  outline: none;
+}
+
+.pdf-search-input:focus {
+  border-color: var(--accent-blue);
+}
+
+.pdf-search-count {
+  font-size: 11px;
+  color: var(--text-muted);
+  min-width: 60px;
   text-align: center;
 }
 

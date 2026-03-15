@@ -14,6 +14,7 @@ export default function Toolbar({ onCompile, onLocalCompile, onBack }: ToolbarPr
   const {
     compiling, toggleTerminal, toggleFileTree, showTerminal, showFileTree,
     showReviewPanel, toggleReviewPanel, showChat, toggleChat,
+    showSearch, toggleSearch,
     connectionState, overleafProject, onlineUsersCount
   } = useAppStore()
 
@@ -47,6 +48,9 @@ export default function Toolbar({ onCompile, onLocalCompile, onBack }: ToolbarPr
         </button>
         <button className="toolbar-btn" onClick={toggleFileTree} title="Toggle file tree">
           {showFileTree ? '◧' : '☰'}
+        </button>
+        <button className={`toolbar-btn ${showSearch ? 'active' : ''}`} onClick={toggleSearch} title="Search in files (Cmd+Shift+F)">
+          Search
         </button>
         <span className="project-name">
           <span className={`connection-dot ${connectionDot}`} title={connectionState} />

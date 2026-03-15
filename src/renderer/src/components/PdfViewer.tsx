@@ -128,6 +128,7 @@ type LogFilter = 'all' | 'error' | 'warning'
 
 export default function PdfViewer() {
   const { pdfPath, compileLog, compiling } = useAppStore()
+  const pendingPdfGoTo = useAppStore((s) => s.pendingPdfGoTo)
   const containerRef = useRef<HTMLDivElement>(null)  // scroll viewport
   const wrapperRef = useRef<HTMLDivElement>(null)    // inner wrapper (CSS transform target)
   const [scale, setScale] = useState(1.0)
@@ -142,6 +143,15 @@ export default function PdfViewer() {
   const [error, setError] = useState<string | null>(null)
   const prevCompilingRef = useRef(false)
   const renderingRef = useRef(false)
+
+  // PDF text search state
+  const [pdfSearchQuery, setPdfSearchQuery] = useState('')
+  const [pdfSearchVisible, setPdfSearchVisible] = useState(false)
+  const [pdfSearchResults, setPdfSearchResults] = useState<Array<{ page: number; index: number }>>([])
+  const [pdfSearchCurrent, setPdfSearchCurrent] = useState(-1)
+  const pdfTextCache = useRef<Map<number, string>>(new Map())
+  const pdfSearchInputRef = useRef<HTMLInputElement>(null)
+  const pdfDocRef = useRef<any>(null)
 
   // Parse and sort log entries (errors first, then warnings)
   const logEntries = compileLog ? parseCompileLog(compileLog) : []
@@ -294,6 +304,8 @@ export default function PdfViewer() {
       const arrayBuffer = await window.api.readBinary(pdfPath)
       const data = new Uint8Array(arrayBuffer)
       const pdf = await pdfjsLib.getDocument({ data }).promise
+      pdfDocRef.current = pdf
+      pdfTextCache.current.clear()
       setNumPages(pdf.numPages)
 
       const wrapper = wrapperRef.current
@@ -407,6 +419,153 @@ export default function PdfViewer() {
     renderPdf()
   }, [renderPdf])
 
+  // PDF search: Cmd+F when on PDF tab opens search bar
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key === 'f' && tab === 'pdf') {
+        // Only if focus is in the PDF area (not editor)
+        const active = document.activeElement
+        const inEditor = active?.closest('.cm-editor')
+        if (inEditor) return
+        e.preventDefault()
+        setPdfSearchVisible(true)
+        setTimeout(() => pdfSearchInputRef.current?.focus(), 50)
+      }
+      if (e.key === 'Escape' && pdfSearchVisible) {
+        setPdfSearchVisible(false)
+        setPdfSearchQuery('')
+        setPdfSearchResults([])
+        setPdfSearchCurrent(-1)
+      }
+    }
+    window.addEventListener('keydown', handler)
+    return () => window.removeEventListener('keydown', handler)
+  }, [tab, pdfSearchVisible])
+
+  // PDF search: extract text and find matches
+  useEffect(() => {
+    if (!pdfSearchQuery.trim() || !pdfDocRef.current) {
+      setPdfSearchResults([])
+      setPdfSearchCurrent(-1)
+      return
+    }
+
+    const search = async () => {
+      const pdf = pdfDocRef.current
+      if (!pdf) return
+      const q = pdfSearchQuery.toLowerCase()
+      const results: Array<{ page: number; index: number }> = []
+
+      for (let i = 1; i <= pdf.numPages; i++) {
+        let text = pdfTextCache.current.get(i)
+        if (!text) {
+          try {
+            const page = await pdf.getPage(i)
+            const tc = await page.getTextContent()
+            text = tc.items.map((item: any) => item.str).join(' ')
+            pdfTextCache.current.set(i, text)
+          } catch {
+            continue
+          }
+        }
+        const lower = text.toLowerCase()
+        let pos = 0
+        while ((pos = lower.indexOf(q, pos)) !== -1) {
+          results.push({ page: i, index: pos })
+          pos += q.length
+          if (results.length >= 500) break
+        }
+        if (results.length >= 500) break
+      }
+
+      setPdfSearchResults(results)
+      setPdfSearchCurrent(results.length > 0 ? 0 : -1)
+    }
+
+    const timer = setTimeout(search, 200)
+    return () => clearTimeout(timer)
+  }, [pdfSearchQuery])
+
+  // PDF search: scroll to current result
+  useEffect(() => {
+    if (pdfSearchCurrent < 0 || pdfSearchCurrent >= pdfSearchResults.length) return
+    const result = pdfSearchResults[pdfSearchCurrent]
+    if (!result || !wrapperRef.current || !containerRef.current) return
+
+    const canvases = wrapperRef.current.querySelectorAll('canvas.pdf-page')
+    const canvas = canvases[result.page - 1] as HTMLCanvasElement | undefined
+    if (!canvas) return
+
+    const container = containerRef.current
+    const containerRect = container.getBoundingClientRect()
+    const canvasRect = canvas.getBoundingClientRect()
+    const offsetInContainer = canvasRect.top - containerRect.top + container.scrollTop
+
+    // Scroll to roughly the right area of the page
+    container.scrollTo({ top: Math.max(0, offsetInContainer - containerRect.height / 3), behavior: 'smooth' })
+  }, [pdfSearchCurrent, pdfSearchResults])
+
+  const pdfSearchNext = () => {
+    if (pdfSearchResults.length === 0) return
+    setPdfSearchCurrent((c) => (c + 1) % pdfSearchResults.length)
+  }
+
+  const pdfSearchPrev = () => {
+    if (pdfSearchResults.length === 0) return
+    setPdfSearchCurrent((c) => (c - 1 + pdfSearchResults.length) % pdfSearchResults.length)
+  }
+
+  // Handle forward SyncTeX navigation (scroll PDF to page+position)
+  useEffect(() => {
+    if (!pendingPdfGoTo || !wrapperRef.current || !containerRef.current) return
+    const { page, y } = pendingPdfGoTo
+    useAppStore.getState().setPendingPdfGoTo(null)
+
+    // Switch to PDF tab
+    setTab('pdf')
+
+    // Wait a frame for tab switch / render
+    requestAnimationFrame(() => {
+      const wrapper = wrapperRef.current
+      const container = containerRef.current
+      if (!wrapper || !container) return
+
+      const canvases = wrapper.querySelectorAll('canvas.pdf-page')
+      const targetCanvas = canvases[page - 1] as HTMLCanvasElement | undefined
+      if (!targetCanvas) return
+
+      const vpInfo = pageViewportsRef.current.get(page)
+      if (!vpInfo) return
+
+      // y is in PDF points from top; convert to fraction of page height
+      const yFrac = y / vpInfo.height
+      const cssScale = scaleRef.current / renderedScaleRef.current
+
+      // Calculate scroll position
+      const canvasRect = targetCanvas.getBoundingClientRect()
+      const containerRect = container.getBoundingClientRect()
+      const offsetInContainer = canvasRect.top - containerRect.top + container.scrollTop
+      const targetY = offsetInContainer + yFrac * canvasRect.height - containerRect.height / 3
+
+      container.scrollTo({ top: Math.max(0, targetY), behavior: 'smooth' })
+
+      // Flash highlight on the line
+      const highlight = document.createElement('div')
+      highlight.style.cssText = `
+        position: absolute; left: 0; right: 0;
+        height: ${14 * cssScale}px;
+        top: ${canvasRect.top - containerRect.top + container.scrollTop + yFrac * canvasRect.height}px;
+        background: rgba(74, 111, 165, 0.3);
+        pointer-events: none; z-index: 10;
+        transition: opacity 1.5s ease-out;
+      `
+      container.style.position = 'relative'
+      container.appendChild(highlight)
+      setTimeout(() => { highlight.style.opacity = '0' }, 500)
+      setTimeout(() => { highlight.remove() }, 2000)
+    })
+  }, [pendingPdfGoTo])
+
   // Empty state
   if (!pdfPath && !compileLog) {
     return (
@@ -443,6 +602,17 @@ export default function PdfViewer() {
             <span className="pdf-scale">{Math.round(scale * 100)}%</span>
             <button className="toolbar-btn" onClick={() => setScale((s) => Math.min(3, s + 0.25))}>+</button>
             <button className="toolbar-btn" onClick={() => setScale(1.0)}>Fit</button>
+            <button
+              className={`toolbar-btn ${pdfSearchVisible ? 'active' : ''}`}
+              onClick={() => {
+                setPdfSearchVisible(!pdfSearchVisible)
+                if (!pdfSearchVisible) setTimeout(() => pdfSearchInputRef.current?.focus(), 50)
+                else { setPdfSearchQuery(''); setPdfSearchResults([]); setPdfSearchCurrent(-1) }
+              }}
+              title="Search in PDF (Cmd+F)"
+            >
+              &#x2315;
+            </button>
             {pdfPath && (
               <button className="toolbar-btn" onClick={() => window.api.savePdf(pdfPath)} title="Download PDF">
                 ↓
@@ -464,6 +634,43 @@ export default function PdfViewer() {
           </div>
         )}
       </div>
+
+      {/* PDF search bar */}
+      {pdfSearchVisible && tab === 'pdf' && (
+        <div className="pdf-search-bar">
+          <input
+            ref={pdfSearchInputRef}
+            className="pdf-search-input"
+            type="text"
+            placeholder="Search in PDF..."
+            value={pdfSearchQuery}
+            onChange={(e) => setPdfSearchQuery(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && e.shiftKey) pdfSearchPrev()
+              else if (e.key === 'Enter') pdfSearchNext()
+              else if (e.key === 'Escape') {
+                setPdfSearchVisible(false)
+                setPdfSearchQuery('')
+                setPdfSearchResults([])
+                setPdfSearchCurrent(-1)
+              }
+            }}
+          />
+          <span className="pdf-search-count">
+            {pdfSearchResults.length > 0
+              ? `${pdfSearchCurrent + 1}/${pdfSearchResults.length}`
+              : pdfSearchQuery ? 'No results' : ''}
+          </span>
+          <button className="toolbar-btn" onClick={pdfSearchPrev} disabled={pdfSearchResults.length === 0} title="Previous (Shift+Enter)">&#x2191;</button>
+          <button className="toolbar-btn" onClick={pdfSearchNext} disabled={pdfSearchResults.length === 0} title="Next (Enter)">&#x2193;</button>
+          <button className="toolbar-btn" onClick={() => {
+            setPdfSearchVisible(false)
+            setPdfSearchQuery('')
+            setPdfSearchResults([])
+            setPdfSearchCurrent(-1)
+          }} title="Close">&#x2715;</button>
+        </div>
+      )}
 
       {/* PDF view — always mounted, hidden when log is shown */}
       <div className="pdf-container" ref={containerRef} style={{ display: tab === 'pdf' ? undefined : 'none' }}>
