@@ -26,7 +26,7 @@
 
 Download the latest `.dmg` from [Releases](https://github.com/YurenHao0426/lattex/releases).
 
-> **Note:** This is an unsigned build. On first launch, right-click → Open, or allow it in System Settings → Privacy & Security.
+> **Note:** The app is not signed with an Apple Developer certificate. On first launch, macOS will block it. Go to **System Settings → Privacy & Security**, scroll down and click **Open Anyway**.
 
 ### Requirements
 
