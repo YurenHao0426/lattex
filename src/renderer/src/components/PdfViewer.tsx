@@ -214,9 +214,9 @@ export default function PdfViewer() {
 
   // SyncTeX: double-click PDF → jump to source
   const handlePdfDoubleClick = useCallback(async (e: MouseEvent) => {
-    if (!pdfPath) return
+    if (!pdfPath) { console.log('[synctex-ui] no pdfPath'); return }
     const canvas = (e.target as HTMLElement).closest('canvas.pdf-page') as HTMLCanvasElement | null
-    if (!canvas) return
+    if (!canvas) { console.log('[synctex-ui] no canvas target'); return }
 
     const container = containerRef.current
     if (!container) return
@@ -234,12 +234,14 @@ export default function PdfViewer() {
 
     // Convert to PDF points (72 DPI coordinate system, origin bottom-left)
     const vpInfo = pageViewportsRef.current.get(pageNum)
-    if (!vpInfo) return
+    if (!vpInfo) { console.log('[synctex-ui] no viewport info for page', pageNum); return }
     const pdfX = (clickX / rect.width) * vpInfo.width
     const pdfY = vpInfo.height - (clickY / rect.height) * vpInfo.height
 
+    console.log(`[synctex-ui] dblclick page=${pageNum} pdfX=${pdfX.toFixed(1)} pdfY=${pdfY.toFixed(1)} path=${pdfPath}`)
     const result = await window.api.synctexEdit(pdfPath, pageNum, pdfX, pdfY)
-    if (!result) return
+    if (!result) { console.log('[synctex-ui] synctex returned null'); return }
+    console.log(`[synctex-ui] result: file=${result.file} line=${result.line}`)
 
     // Navigate to source — synctex returns relative path (e.g. "latex/main.tex")
     const store = useAppStore.getState()

@@ -53,6 +53,9 @@ function createWindow(): void {
     }
   })
 
+  // Disable Electron's built-in pinch/Ctrl+wheel zoom so editor can handle it
+  mainWindow.webContents.setVisualZoomLevelLimits(1, 1)
+
   if (process.env['ELECTRON_RENDERER_URL']) {
     mainWindow.loadURL(process.env['ELECTRON_RENDERER_URL'])
   } else {
@@ -92,33 +95,44 @@ for (const p of texPaths) {
 ipcMain.handle('synctex:editFromPdf', async (_e, pdfPath: string, page: number, x: number, y: number) => {
   return new Promise<{ file: string; line: number } | null>((resolve) => {
     const pdfDir = pdfPath.substring(0, pdfPath.lastIndexOf('/'))
+    console.log(`[synctex] edit -o ${page}:${x}:${y}:${pdfPath} (cwd: ${pdfDir})`)
     const proc = spawn('synctex', ['edit', '-o', `${page}:${x}:${y}:${pdfPath}`], {
       env: process.env,
       cwd: pdfDir
     })
-    let out = ''
-    proc.stdout?.on('data', (d) => { out += d.toString() })
-    proc.stderr?.on('data', (d) => { out += d.toString() })
-    proc.on('close', () => {
+    let stdout = ''
+    let stderr = ''
+    proc.stdout?.on('data', (d) => { stdout += d.toString() })
+    proc.stderr?.on('data', (d) => { stderr += d.toString() })
+    proc.on('close', (code) => {
+      console.log(`[synctex] exit=${code} stdout=${stdout.slice(0, 300)} stderr=${stderr.slice(0, 200)}`)
       // Parse output: Input:filename\nLine:123\n...
-      const fileMatch = out.match(/Input:(.+)/)
-      const lineMatch = out.match(/Line:(\d+)/)
+      const fileMatch = stdout.match(/Input:(.+)/)
+      const lineMatch = stdout.match(/Line:(\d+)/)
       if (fileMatch && lineMatch) {
         let filePath = fileMatch[1].trim()
-        // Convert absolute path to relative (strip tmpDir prefix)
+        // Strip CLSI compilation prefix (server compile uses /compile/ as cwd)
+        if (filePath.startsWith('/compile/')) {
+          filePath = filePath.slice('/compile/'.length)
+        }
+        // Convert absolute path to relative (strip tmpDir prefix for local compile)
         const syncDir = compilationManager?.dir
         if (syncDir && filePath.startsWith(syncDir)) {
           filePath = filePath.slice(syncDir.length).replace(/^\//, '')
         }
         // Strip leading ./
         if (filePath.startsWith('./')) filePath = filePath.slice(2)
+        console.log(`[synctex] resolved: file=${filePath} line=${lineMatch[1]}`)
         resolve({ file: filePath, line: parseInt(lineMatch[1]) })
       } else {
-        console.log('[synctex] no result:', out.slice(0, 200))
+        console.log('[synctex] no match in output')
         resolve(null)
       }
     })
-    proc.on('error', () => resolve(null))
+    proc.on('error', (err) => {
+      console.log(`[synctex] spawn error: ${err.message}`)
+      resolve(null)
+    })
   })
 })
 
@@ -648,8 +662,11 @@ ipcMain.handle('ot:connect', async (_e, projectId: string) => {
         }
       }
     }, null, 2)).catch(() => {})
-    // Write CLAUDE.md with project context
-    writeFile(join(tmpDir, 'CLAUDE.md'), `# LatteX Project — Overleaf Integration
+    // Clean up old root-level CLAUDE.md (was incorrectly placed there before)
+    require('fs').unlink(join(tmpDir, 'CLAUDE.md'), () => {})
+    // Write .claude/ dir with CLAUDE.md + settings (dotfile dir = excluded from sync)
+    mkdirAsync(join(tmpDir, '.claude'), { recursive: true }).then(async () => {
+    await writeFile(join(tmpDir, '.claude', 'CLAUDE.md'), `# LatteX Project — Overleaf Integration
 
 This is a LaTeX project synced from Overleaf via LatteX. Files here are bidirectionally synced — edits you make will appear on Overleaf.
 
@@ -690,10 +707,8 @@ You have MCP tools to interact with Overleaf. Use them proactively.
 2. Use \`compile_latex\` to compile
 3. If errors: use \`get_compile_errors\` for details, fix them, recompile
 4. If warnings: use \`get_compile_warnings\` to review
-`).catch(() => {})
-    // Write .claude/settings.json to auto-allow MCP tools
-    mkdirAsync(join(tmpDir, '.claude'), { recursive: true }).then(() =>
-      writeFile(join(tmpDir, '.claude', 'settings.json'), JSON.stringify({
+`)
+    await writeFile(join(tmpDir, '.claude', 'settings.json'), JSON.stringify({
         permissions: {
           allow: [
             'mcp__lattex__get_comments',
@@ -711,7 +726,7 @@ You have MCP tools to interact with Overleaf. Use them proactively.
           ]
         }
       }, null, 2))
-    ).catch(() => {})
+    }).catch(() => {})
 
     // Fetch resolved thread IDs immediately (fast REST call) so editor highlights
     // don't flash resolved comments while waiting for background fetch
@@ -749,6 +764,15 @@ You have MCP tools to interact with Overleaf. Use them proactively.
       sendToRenderer('comments:initContexts', { contexts })
     }, 3000)
 
+    // Check for cached PDF from previous compile
+    const buildDir = join(tmpDir, '.build')
+    const cachedPdf = join(buildDir, 'output.pdf')
+    let cachedPdfPath: string | undefined
+    try {
+      const stat = await require('fs').promises.stat(cachedPdf)
+      if (stat.size > 0) cachedPdfPath = cachedPdf
+    } catch { /* no cached PDF */ }
+
     return {
       success: true,
       files,
@@ -760,7 +784,8 @@ You have MCP tools to interact with Overleaf. Use them proactively.
       pathDocMap,
       fileRefs,
       rootFolderId,
-      syncDir: tmpDir
+      syncDir: tmpDir,
+      cachedPdfPath
     }
   } catch (e) {
     console.log('[ot:connect] error:', e)
@@ -1262,13 +1287,20 @@ ipcMain.handle('overleaf:serverCompile', async (_e, rootDocId?: string) => {
       }
     }
 
-    // Grab synctex.gz
+    // Grab synctex.gz (needed for PDF↔source navigation)
     const synctexFile = (data.outputFiles || []).find((f: any) => f.path === 'output.synctex.gz')
     if (synctexFile) {
       try {
-        const d = await fetchBinary(buildOutputUrl(synctexFile))
+        const synctexUrl = buildOutputUrl(synctexFile)
+        console.log(`[compile] downloading synctex.gz from ${synctexUrl.slice(0, 80)}...`)
+        const d = await fetchBinary(synctexUrl)
         await writeFile(join(buildDir, 'output.synctex.gz'), Buffer.from(d))
-      } catch { /* optional */ }
+        console.log(`[compile] synctex.gz saved (${d.byteLength} bytes)`)
+      } catch (e) {
+        console.log(`[compile] synctex.gz download failed: ${e}`)
+      }
+    } else {
+      console.log('[compile] no synctex.gz in compile output')
     }
 
     // Download PDF — first check outputFiles, then try direct URL from build ID

@@ -1,8 +1,14 @@
 // Copyright (c) 2026 Yuren Hao
 // Licensed under AGPL-3.0 - see LICENSE file
 
-import { contextBridge, ipcRenderer, webUtils } from 'electron'
+import { contextBridge, ipcRenderer, webUtils, webFrame } from 'electron'
 import { createHash } from 'crypto'
+
+// Prevent Electron's built-in Ctrl+wheel zoom so editor can handle font scaling
+webFrame.setVisualZoomLevelLimits(1, 1)
+window.addEventListener('wheel', (e) => {
+  if (e.ctrlKey || e.metaKey) e.preventDefault()
+}, { passive: false })
 
 const api = {
   // File system
@@ -66,6 +72,8 @@ const api = {
       pathDocMap?: Record<string, string>
       fileRefs?: Array<{ id: string; path: string }>
       rootFolderId?: string
+      syncDir?: string
+      cachedPdfPath?: string
       message?: string
     }>,
   otDisconnect: () => ipcRenderer.invoke('ot:disconnect'),

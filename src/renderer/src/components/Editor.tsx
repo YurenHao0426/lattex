@@ -88,6 +88,7 @@ export default function Editor() {
   const docSyncRef = useRef<OverleafDocSync | null>(null)
 
   const cursorThrottleRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const [editorFontSize, setEditorFontSize] = useState(13.5)
 
   // Add comment state
   const [newComment, setNewComment] = useState<{ from: number; to: number; text: string } | null>(null)
@@ -357,6 +358,29 @@ export default function Editor() {
     if (!viewRef.current) return
     viewRef.current.dispatch({ effects: highlightThreadEffect.of(hoveredThreadId) })
   }, [hoveredThreadId])
+
+  // Ctrl+wheel / pinch zoom on editor (capture phase to beat CodeMirror)
+  useEffect(() => {
+    const el = editorRef.current
+    if (!el) return
+    const handleWheel = (e: WheelEvent) => {
+      if (!(e.ctrlKey || e.metaKey)) return
+      e.preventDefault()
+      e.stopPropagation()
+      const delta = e.deltaY > 0 ? -1 : 1
+      setEditorFontSize((s) => Math.min(28, Math.max(8, +(s + delta * 0.5).toFixed(1))))
+    }
+    el.addEventListener('wheel', handleWheel, { passive: false, capture: true })
+    return () => el.removeEventListener('wheel', handleWheel, { capture: true })
+  }, [])
+
+  // Apply font size to editor
+  useEffect(() => {
+    if (!viewRef.current) return
+    const wrapper = viewRef.current.dom
+    wrapper.style.fontSize = `${editorFontSize}px`
+    viewRef.current.requestMeasure()
+  }, [editorFontSize])
 
   if (!activeTab) {
     return (
