@@ -486,6 +486,15 @@ const TOOLS = [
         }
       }
     }
+  },
+  // ── Online Users ──
+  {
+    name: 'get_online_users',
+    description: 'Get the list of users currently online in this Overleaf project.',
+    inputSchema: {
+      type: 'object',
+      properties: {}
+    }
   }
 ]
 
@@ -859,6 +868,21 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         return textResult(
           `Compile log (status: ${lastCompileStatus}):\n\n${log}`
         )
+      }
+
+      case 'get_online_users': {
+        const cwd = process.cwd()
+        const usersPath = join(cwd, '.lattex-online-users.json')
+        try {
+          const users = JSON.parse(readFileSync(usersPath, 'utf-8'))
+          if (!Array.isArray(users) || users.length === 0) {
+            return textResult('No other users currently online.')
+          }
+          const lines = users.map(u => `- ${u.name}${u.email ? ` (${u.email})` : ''}`)
+          return textResult(`${users.length} user(s) online:\n${lines.join('\n')}`)
+        } catch {
+          return textResult('No other users currently online.')
+        }
       }
 
       default:

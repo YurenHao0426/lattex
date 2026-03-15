@@ -163,7 +163,8 @@ export class FileSyncBridge {
       ignored: [
         /(^|[/\\])\../, // dotfiles
         /\.(aux|log|fls|fdb_latexmk|synctex\.gz|bbl|blg|out|toc|lof|lot|nav|snm|vrb|pdf|pdfxref|stderr|stdout|chktex)$/, // LaTeX output files
-        /(?:^|[/\\])(?:CLAUDE\.md|\.mcp\.json)$/ // App-generated config files
+        /(?:^|[/\\])(?:CLAUDE\.md|\.mcp\.json)$/, // App-generated config files
+        /(?:^|[/\\])claude-workspace(?:[/\\]|$)/ // Claude Code scratch space (not synced)
       ]
     })
 
@@ -530,9 +531,10 @@ export class FileSyncBridge {
   private onFileChanged(relPath: string): void {
     if (this.stopped) return
 
-    // Skip app-generated config files that should not be synced to Overleaf
+    // Skip app-generated config files and scratch space that should not be synced
     const basename = relPath.split('/').pop() || relPath
     if (basename === 'CLAUDE.md' || basename === '.mcp.json') return
+    if (relPath.startsWith('claude-workspace/') || relPath === 'claude-workspace') return
 
     // Layer 1: Skip if bridge is currently writing this file
     if (this.writesInProgress.has(relPath)) {
@@ -950,10 +952,11 @@ export class FileSyncBridge {
 
     for (const relPath of allFiles) {
       if (this.pathDocMap[relPath] || this.pathFileRefMap[relPath]) continue
-      // Skip LaTeX output files and app-generated config files
+      // Skip LaTeX output files, app-generated config files, and scratch space
       if (/\.(aux|log|fls|fdb_latexmk|synctex\.gz|bbl|blg|out|toc|lof|lot|nav|snm|vrb|pdf|pdfxref|stderr|stdout|chktex|synctex)/.test(relPath)) continue
       if (/(^|[/\\])\./.test(relPath)) continue
       if (/(?:^|[/\\])(?:CLAUDE\.md|\.mcp\.json)$/.test(relPath)) continue
+      if (relPath.startsWith('claude-workspace/') || relPath === 'claude-workspace') continue
 
       bridgeLog(`[FileSyncBridge] orphaned file found: ${relPath}`)
       this.onNewLocalFile(relPath)
@@ -970,10 +973,11 @@ export class FileSyncBridge {
     if (this.stopped) return
     if (this.writesInProgress.has(relPath)) return
 
-    // Skip LaTeX output files, dotfiles, and app-generated config files (same as chokidar ignored)
+    // Skip LaTeX output files, dotfiles, app-generated config files, and scratch space
     if (/\.(aux|log|fls|fdb_latexmk|synctex\.gz|bbl|blg|out|toc|lof|lot|nav|snm|vrb|pdf|pdfxref|stderr|stdout|chktex)$/.test(relPath)) return
     if (/(^|[/\\])\./.test(relPath)) return
     if (/(?:^|[/\\])(?:CLAUDE\.md|\.mcp\.json)$/.test(relPath)) return
+    if (relPath.startsWith('claude-workspace/') || relPath === 'claude-workspace') return
 
     // Debounce 1s to let the tool finish writing
     const key = 'new:' + relPath

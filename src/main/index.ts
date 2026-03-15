@@ -23,6 +23,8 @@ let mcpStateDir = ''           // syncDir for .lattex-mcp.json
 let mcpProjectId = ''
 let mcpCommentContexts: Record<string, { file: string; text: string; pos: number }> = {}
 let mcpPathDocMap: Record<string, string> = {}  // relPath → docId for MCP
+const mcpOnlineUsers = new Map<string, { name: string; email?: string }>()
+let mcpOnlineUsersWriteTimer: ReturnType<typeof setTimeout> | null = null
 
 async function writeMcpState(): Promise<void> {
   if (!mcpStateDir || !mcpProjectId) return
@@ -36,6 +38,15 @@ async function writeMcpState(): Promise<void> {
     }
     await writeFile(join(mcpStateDir, '.lattex-mcp.json'), JSON.stringify(state, null, 2))
   } catch { /* ignore */ }
+}
+
+function writeMcpOnlineUsers(): void {
+  if (!mcpStateDir) return
+  if (mcpOnlineUsersWriteTimer) clearTimeout(mcpOnlineUsersWriteTimer)
+  mcpOnlineUsersWriteTimer = setTimeout(() => {
+    const users = Array.from(mcpOnlineUsers.entries()).map(([id, u]) => ({ id, ...u }))
+    writeFile(join(mcpStateDir, '.lattex-online-users.json'), JSON.stringify(users)).catch(() => {})
+  }, 500)
 }
 
 function createWindow(): void {
@@ -714,12 +725,23 @@ ipcMain.handle('ot:connect', async (_e, projectId: string) => {
       })
     })
 
-    // Relay collaborator cursor updates to renderer
+    // Relay collaborator cursor updates to renderer + track for MCP
     overleafSock.on('serverEvent', (name: string, args: unknown[]) => {
       if (name === 'clientTracking.clientUpdated') {
         sendToRenderer('cursor:remoteUpdate', args[0])
+        // Track online user for MCP
+        const u = args[0] as { id: string; user_id?: string; name?: string; email?: string }
+        if (u.id) {
+          mcpOnlineUsers.set(u.id, { name: u.name || u.email?.split('@')[0] || 'User', email: u.email })
+          writeMcpOnlineUsers()
+        }
       } else if (name === 'clientTracking.clientDisconnected') {
         sendToRenderer('cursor:remoteDisconnected', args[0])
+        const clientId = args[0] as string
+        if (clientId) {
+          mcpOnlineUsers.delete(clientId)
+          writeMcpOnlineUsers()
+        }
       } else if (name === 'new-chat-message') {
         sendToRenderer('chat:newMessage', args[0])
       } else if (
@@ -769,40 +791,52 @@ ipcMain.handle('ot:connect', async (_e, projectId: string) => {
     }, null, 2)).catch(() => {})
     // Clean up old root-level CLAUDE.md (was incorrectly placed there before)
     require('fs').unlink(join(tmpDir, 'CLAUDE.md'), () => {})
+    // Create claude-workspace/ for Claude Code scratch space (not synced to Overleaf)
+    mkdirAsync(join(tmpDir, 'claude-workspace'), { recursive: true }).catch(() => {})
     // Write .claude/ dir with CLAUDE.md + settings (dotfile dir = excluded from sync)
     mkdirAsync(join(tmpDir, '.claude'), { recursive: true }).then(async () => {
     const rootDocPath = docPathMap[projectResult.project.rootDoc_id] || 'main.tex'
     const texFiles = Object.values(docPathMap).filter((p: string) => p.endsWith('.tex'))
     const fileListStr = texFiles.map((p: string) => `- \`${p}\``).join('\n')
 
+    // Fetch current user's name for CLAUDE.md
+    let currentUserName = ''
+    try {
+      const userResult = await overleafFetch('/user/settings')
+      if (userResult.ok && userResult.data) {
+        const u = userResult.data as { first_name?: string; last_name?: string; email?: string }
+        currentUserName = [u.first_name, u.last_name].filter(Boolean).join(' ') || u.email || ''
+      }
+    } catch { /* non-fatal */ }
+    const ownerName = [projectResult.project.owner.first_name, projectResult.project.owner.last_name].filter(Boolean).join(' ')
+
     await writeFile(join(tmpDir, '.claude', 'CLAUDE.md'), `# ${projectResult.project.name} — Overleaf Project
 
+> **IMPORTANT — MANDATORY FIRST STEPS (do this EVERY conversation before ANY edits):**
+>
+> 1. **Read \`${rootDocPath}\`** and ALL files it \\\\input/\\\\include to understand the full paper structure, notation, and conventions. You MUST NOT skip this step or make any edits before completing it.
+> 2. **Run \`get_comments\`** to check for reviewer comments, TODOs, or ongoing discussions.
+> 3. Only AFTER completing steps 1–2 may you proceed with the user's request.
+>
+> This is a live Overleaf project — your edits appear to collaborators in real-time. Careless changes to a document you haven't read will break things.
+
 This is a LaTeX project synced from Overleaf via LatteX. All files here are **bidirectionally synced** — your edits appear on Overleaf in real-time, and vice versa.
+${currentUserName ? `\n**You are logged in as: ${currentUserName}** — this is the name that appears on comments and edits. The project owner is ${ownerName}.` : `\n**Project owner**: ${ownerName}`}
 
 ## Project Structure
 
 - **Main file**: \`${rootDocPath}\` (this is the root document for compilation)
 ${fileListStr ? `- **TeX files**:\n${fileListStr}` : ''}
 
-## Guidelines
+## Rules
 
-### Before Starting
-- **Read the full document first.** Before making any changes, read through \`${rootDocPath}\` and its \\\\input/\\\\include files to understand the paper's structure, notation, and conventions.
-- **Check comments.** Use \`get_comments\` to see if there are reviewer comments or TODOs that inform what needs to be done.
-
-### Writing Style
-- **Match existing conventions.** Follow the notation, formatting, macro usage, and sectioning style already established in the document.
-- **Don't reorganize without asking.** Preserve the existing structure — don't move sections, rename labels, or refactor macros unless explicitly asked.
-- **Preserve \\\\label names.** Changing labels breaks cross-references across files. Only rename if asked.
-
-### Editing
-- **Make targeted edits.** Modify only the parts that need changing. Don't rewrite surrounding paragraphs for style.
-- **Compile after changes.** Use \`compile_latex\` to verify your edits don't introduce errors. If compilation fails, use \`get_compile_errors\` and fix immediately.
-- **One logical change at a time.** Don't mix unrelated edits in a single pass.
-
-### Collaboration
-- **Respond to comments.** When you address a comment, use \`reply_to_comment\` to explain what you changed, then \`resolve_comment\`.
-- **Don't delete others' comments.** Only resolve them after addressing the feedback.
+- **NEVER edit without reading first.** You must understand what you are changing. Read the relevant file(s) fully before making any modification.
+- **Match existing conventions.** Follow the notation, formatting, macro usage, and sectioning style already established in the document. Do NOT impose your own style.
+- **Do NOT reorganize, rename labels, or refactor macros** unless explicitly asked.
+- **Make targeted edits only.** Modify the specific parts that need changing. Do not rewrite surrounding paragraphs for style.
+- **One logical change at a time.** Do not mix unrelated edits in a single pass.
+- **Compile after changes.** Use \`compile_latex\` after every edit. If compilation fails, use \`get_compile_errors\` and fix immediately before proceeding.
+- **Respond to comments.** When you address a comment, use \`reply_to_comment\` to explain what you changed, then \`resolve_comment\`. Never delete others' comments.
 
 ## MCP Tools
 
@@ -821,6 +855,7 @@ You have MCP tools to interact with Overleaf. Use them proactively.
 
 ### Project
 - **list_project_files**: List all files with sizes.
+- **get_online_users**: See who is currently online in this project.
 
 ### Compilation
 - **compile_latex**: Trigger LaTeX compilation on Overleaf server. Returns status + error summary.
@@ -842,6 +877,15 @@ You have MCP tools to interact with Overleaf. Use them proactively.
 2. Use \`compile_latex\` to compile
 3. If errors: use \`get_compile_errors\` for details, fix them, recompile
 4. If warnings: use \`get_compile_warnings\` to review
+
+## Workspace
+
+The \`claude-workspace/\` directory is your private scratch space. It is **not synced to Overleaf** — use it freely for:
+- **Notes and plans** — draft outlines, track TODOs, keep analysis notes
+- **Experiments** — test LaTeX snippets, try alternative formulations, prototype figures
+- **Scripts** — helper scripts for data processing, bibliography management, etc.
+
+**Important**: Always ask the user before running experiments or creating files in \`claude-workspace/\`. This directory persists across sessions for the same project.
 `)
     await writeFile(join(tmpDir, '.claude', 'settings.json'), JSON.stringify({
         permissions: {
@@ -854,6 +898,7 @@ You have MCP tools to interact with Overleaf. Use them proactively.
             'mcp__lattex__get_chat_messages',
             'mcp__lattex__send_chat_message',
             'mcp__lattex__list_project_files',
+            'mcp__lattex__get_online_users',
             'mcp__lattex__compile_latex',
             'mcp__lattex__get_compile_errors',
             'mcp__lattex__get_compile_warnings',
@@ -933,10 +978,12 @@ ipcMain.handle('ot:disconnect', async () => {
   stopMcpCompileWatcher()
   if (mcpStateDir) {
     unlink(join(mcpStateDir, '.lattex-mcp.json')).catch(() => {})
+    unlink(join(mcpStateDir, '.lattex-online-users.json')).catch(() => {})
   }
   mcpStateDir = ''
   mcpProjectId = ''
   mcpCommentContexts = {}
+  mcpOnlineUsers.clear()
 
   await fileSyncBridge?.stop()
   fileSyncBridge = null
@@ -1039,7 +1086,18 @@ ipcMain.handle('cursor:update', async (_e, docId: string, row: number, column: n
 ipcMain.handle('cursor:getConnectedUsers', async () => {
   if (!overleafSock) return []
   try {
-    return await overleafSock.getConnectedUsers()
+    const users = await overleafSock.getConnectedUsers()
+    // Seed MCP online users map
+    mcpOnlineUsers.clear()
+    for (const raw of users) {
+      const u = raw as { client_id?: string; first_name?: string; last_name?: string; email?: string }
+      if (u.client_id) {
+        const name = [u.first_name, u.last_name].filter(Boolean).join(' ') || u.email?.split('@')[0] || 'User'
+        mcpOnlineUsers.set(u.client_id, { name, email: u.email })
+      }
+    }
+    writeMcpOnlineUsers()
+    return users
   } catch (e) {
     console.log('[cursor:getConnectedUsers] error:', e)
     return []

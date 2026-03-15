@@ -1,6 +1,6 @@
 {
   "name": "lattex",
-  "version": "0.3.3",
+  "version": "0.3.4",
   "description": "LaTeX editor with real-time Overleaf sync",
   "license": "AGPL-3.0",
   "author": "Yuren Hao",

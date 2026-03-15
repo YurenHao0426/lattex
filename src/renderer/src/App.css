@@ -2229,6 +2229,10 @@ html, body, #root {
 
 /* ── Toolbar Users Count ─────────────────────────────────────── */
 
+.toolbar-users-wrap {
+  position: relative;
+}
+
 .toolbar-users {
   font-size: 11px;
   color: var(--text-muted);
@@ -2236,6 +2240,66 @@ html, body, #root {
   padding: 2px 8px;
   border-radius: 10px;
   font-weight: 500;
+  border: none;
+  cursor: pointer;
+  font-family: var(--font-sans);
+}
+
+.toolbar-users:hover {
+  background: var(--bg-active);
+}
+
+.users-popover {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px 0;
+  min-width: 180px;
+  z-index: 100;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+}
+
+.users-popover-title {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  padding: 4px 12px 6px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 2px;
+}
+
+.users-popover-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 12px;
+  font-size: 12px;
+  color: var(--text-primary);
+}
+
+.users-popover-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.users-popover-name {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.users-popover-empty {
+  padding: 5px 12px;
+  font-size: 11px;
+  color: var(--text-muted);
+  font-style: italic;
 }
 
 /* ── Chat Panel ──────────────────────────────────────────────── */

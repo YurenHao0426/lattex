@@ -3,6 +3,7 @@
 
 import { useState, useRef, useEffect } from 'react'
 import { useAppStore } from '../stores/appStore'
+import { remoteCursors } from '../App'
 
 interface ToolbarProps {
   onCompile: () => void
@@ -19,19 +20,24 @@ export default function Toolbar({ onCompile, onLocalCompile, onBack }: ToolbarPr
   } = useAppStore()
 
   const [showCompileMenu, setShowCompileMenu] = useState(false)
+  const [showUsersPopover, setShowUsersPopover] = useState(false)
   const menuRef = useRef<HTMLDivElement>(null)
+  const usersRef = useRef<HTMLDivElement>(null)
 
-  // Close menu on outside click
+  // Close menus on outside click
   useEffect(() => {
-    if (!showCompileMenu) return
+    if (!showCompileMenu && !showUsersPopover) return
     const handler = (e: MouseEvent) => {
-      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
+      if (showCompileMenu && menuRef.current && !menuRef.current.contains(e.target as Node)) {
         setShowCompileMenu(false)
+      }
+      if (showUsersPopover && usersRef.current && !usersRef.current.contains(e.target as Node)) {
+        setShowUsersPopover(false)
       }
     }
     document.addEventListener('mousedown', handler)
     return () => document.removeEventListener('mousedown', handler)
-  }, [showCompileMenu])
+  }, [showCompileMenu, showUsersPopover])
 
   const projectName = overleafProject?.name || 'Project'
 
@@ -91,9 +97,29 @@ export default function Toolbar({ onCompile, onLocalCompile, onBack }: ToolbarPr
       </div>
       <div className="toolbar-right">
         {onlineUsersCount > 0 && (
-          <span className="toolbar-users" title={`${onlineUsersCount} user${onlineUsersCount > 1 ? 's' : ''} online`}>
-            {onlineUsersCount}
-          </span>
+          <div className="toolbar-users-wrap" ref={usersRef}>
+            <button
+              className="toolbar-users"
+              onClick={() => setShowUsersPopover(!showUsersPopover)}
+              title={`${onlineUsersCount} user${onlineUsersCount > 1 ? 's' : ''} online`}
+            >
+              {onlineUsersCount} online
+            </button>
+            {showUsersPopover && (
+              <div className="users-popover">
+                <div className="users-popover-title">Online Users</div>
+                {Array.from(remoteCursors.values()).map((u) => (
+                  <div key={u.userId} className="users-popover-item">
+                    <span className="users-popover-dot" style={{ background: u.color }} />
+                    <span className="users-popover-name">{u.name}</span>
+                  </div>
+                ))}
+                {remoteCursors.size === 0 && (
+                  <div className="users-popover-empty">No cursor data yet</div>
+                )}
+              </div>
+            )}
+          </div>
         )}
         <button className={`toolbar-btn ${showChat ? 'active' : ''}`} onClick={toggleChat} title="Toggle chat">
           Chat
