@@ -109,8 +109,8 @@ interface AppState {
   // Comment data
   commentContexts: Record<string, CommentContext>
   setCommentContexts: (c: Record<string, CommentContext>) => void
-  resolvedThreadIds: Set<string>
-  setResolvedThreadIds: (ids: Set<string>) => void
+  resolvedThreadIds: Set<string> | null
+  setResolvedThreadIds: (ids: Set<string> | null) => void
   overleafDocs: Record<string, string>
   setOverleafDocs: (d: Record<string, string>) => void
   hoveredThreadId: string | null
@@ -221,7 +221,7 @@ export const useAppStore = create<AppState>((set) => ({
 
   commentContexts: {},
   setCommentContexts: (c) => set({ commentContexts: c }),
-  resolvedThreadIds: new Set<string>(),
+  resolvedThreadIds: null,
   setResolvedThreadIds: (ids) => set({ resolvedThreadIds: ids }),
   overleafDocs: {},
   setOverleafDocs: (d) => set({ overleafDocs: d }),
@@ -255,7 +255,7 @@ export const useAppStore = create<AppState>((set) => ({
     rootFolderId: '',
     syncDir: '',
     commentContexts: {},
-    resolvedThreadIds: new Set<string>(),
+    resolvedThreadIds: null,
     overleafDocs: {},
     hoveredThreadId: null,
     focusedThreadId: null,

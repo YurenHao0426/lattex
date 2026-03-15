@@ -241,13 +241,32 @@ export default function PdfViewer() {
     const result = await window.api.synctexEdit(pdfPath, pageNum, pdfX, pdfY)
     if (!result) return
 
-    // Navigate to the source file:line
-    try {
-      const content = await window.api.readFile(result.file)
-      useAppStore.getState().setFileContent(result.file, content)
-      useAppStore.getState().openFile(result.file, result.file.split('/').pop() || result.file)
-      useAppStore.getState().setPendingGoTo({ file: result.file, line: result.line })
-    } catch { /* file not found */ }
+    // Navigate to source — synctex returns relative path (e.g. "latex/main.tex")
+    const store = useAppStore.getState()
+    const relPath = result.file
+
+    // If already loaded in editor, just navigate
+    if (store.fileContents[relPath]) {
+      store.openFile(relPath, relPath.split('/').pop() || relPath)
+      store.setPendingGoTo({ file: relPath, line: result.line })
+      return
+    }
+
+    // Not loaded — join via socket
+    const docId = store.pathDocMap[relPath]
+    if (docId) {
+      try {
+        const joinResult = await window.api.otJoinDoc(docId)
+        if (joinResult.success && joinResult.content !== undefined) {
+          useAppStore.getState().setFileContent(relPath, joinResult.content)
+          if (joinResult.version !== undefined) {
+            useAppStore.getState().setDocVersion(docId, joinResult.version)
+          }
+          useAppStore.getState().openFile(relPath, relPath.split('/').pop() || relPath)
+          useAppStore.getState().setPendingGoTo({ file: relPath, line: result.line })
+        }
+      } catch { /* failed to join doc */ }
+    }
   }, [pdfPath])
 
   // Render PDF (with lock to prevent double-render)
@@ -356,6 +375,11 @@ export default function PdfViewer() {
             <span className="pdf-scale">{Math.round(scale * 100)}%</span>
             <button className="toolbar-btn" onClick={() => setScale((s) => Math.min(3, s + 0.25))}>+</button>
             <button className="toolbar-btn" onClick={() => setScale(1.0)}>Fit</button>
+            {pdfPath && (
+              <button className="toolbar-btn" onClick={() => window.api.savePdf(pdfPath)} title="Download PDF">
+                ↓
+              </button>
+            )}
           </>
         )}
         {tab === 'log' && (

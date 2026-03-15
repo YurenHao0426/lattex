@@ -335,8 +335,9 @@ export default function Editor() {
   }, [activeTab, pathDocMap])
 
   // Sync comment ranges to CodeMirror (exclude resolved threads)
+  // Skip until resolvedThreadIds has been loaded (non-null) to avoid flashing resolved highlights
   useEffect(() => {
-    if (!viewRef.current || !activeTab) return
+    if (!viewRef.current || !activeTab || resolvedThreadIds === null) return
     const ranges: CommentRange[] = []
     for (const [threadId, ctx] of Object.entries(commentContexts)) {
       if (ctx.file === activeTab && ctx.text && !resolvedThreadIds.has(threadId)) {

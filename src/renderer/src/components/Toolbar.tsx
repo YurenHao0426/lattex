@@ -1,19 +1,36 @@
 // Copyright (c) 2026 Yuren Hao
 // Licensed under AGPL-3.0 - see LICENSE file
 
+import { useState, useRef, useEffect } from 'react'
 import { useAppStore } from '../stores/appStore'
 
 interface ToolbarProps {
   onCompile: () => void
+  onLocalCompile: () => void
   onBack: () => void
 }
 
-export default function Toolbar({ onCompile, onBack }: ToolbarProps) {
+export default function Toolbar({ onCompile, onLocalCompile, onBack }: ToolbarProps) {
   const {
     compiling, toggleTerminal, toggleFileTree, showTerminal, showFileTree,
     showReviewPanel, toggleReviewPanel, showChat, toggleChat,
     connectionState, overleafProject, onlineUsersCount
   } = useAppStore()
+
+  const [showCompileMenu, setShowCompileMenu] = useState(false)
+  const menuRef = useRef<HTMLDivElement>(null)
+
+  // Close menu on outside click
+  useEffect(() => {
+    if (!showCompileMenu) return
+    const handler = (e: MouseEvent) => {
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
+        setShowCompileMenu(false)
+      }
+    }
+    document.addEventListener('mousedown', handler)
+    return () => document.removeEventListener('mousedown', handler)
+  }, [showCompileMenu])
 
   const projectName = overleafProject?.name || 'Project'
 
@@ -37,14 +54,36 @@ export default function Toolbar({ onCompile, onBack }: ToolbarProps) {
         </span>
       </div>
       <div className="toolbar-center">
-        <button
-          className={`toolbar-btn toolbar-btn-primary ${compiling ? 'compiling' : ''}`}
-          onClick={onCompile}
-          disabled={compiling}
-          title="Compile (Cmd+B)"
-        >
-          {compiling ? 'Compiling...' : 'Compile'}
-        </button>
+        <div className="compile-btn-group" ref={menuRef}>
+          <button
+            className={`toolbar-btn toolbar-btn-primary ${compiling ? 'compiling' : ''}`}
+            onClick={onCompile}
+            disabled={compiling}
+            title="Compile on Overleaf server (Cmd+B)"
+          >
+            {compiling ? 'Compiling...' : 'Compile'}
+          </button>
+          <button
+            className="toolbar-btn toolbar-btn-primary compile-dropdown-toggle"
+            onClick={() => setShowCompileMenu(!showCompileMenu)}
+            disabled={compiling}
+            title="Compile options"
+          >
+            ▾
+          </button>
+          {showCompileMenu && (
+            <div className="compile-dropdown-menu">
+              <button className="compile-dropdown-item" onClick={() => { setShowCompileMenu(false); onCompile() }}>
+                Server Compile
+                <span className="compile-dropdown-hint">Cmd+B</span>
+              </button>
+              <button className="compile-dropdown-item" onClick={() => { setShowCompileMenu(false); onLocalCompile() }}>
+                Local Compile
+                <span className="compile-dropdown-hint">latexmk</span>
+              </button>
+            </div>
+          )}
+        </div>
       </div>
       <div className="toolbar-right">
         {onlineUsersCount > 0 && (

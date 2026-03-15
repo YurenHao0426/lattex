@@ -10,6 +10,10 @@ import { OverleafSocket, type RootFolder, type SubFolder, type JoinDocResult } f
 import { CompilationManager } from './compilationManager'
 import { FileSyncBridge } from './fileSyncBridge'
 
+// Prevent EPIPE crashes when stdout/stderr is closed (e.g. Electron launched from Finder)
+process.stdout?.on('error', () => {})
+process.stderr?.on('error', () => {})
+
 let mainWindow: BrowserWindow | null = null
 const ptyInstances = new Map<string, pty.IPty>()
 let overleafSock: OverleafSocket | null = null
@@ -87,8 +91,10 @@ for (const p of texPaths) {
 // SyncTeX: PDF position → source file:line (inverse search)
 ipcMain.handle('synctex:editFromPdf', async (_e, pdfPath: string, page: number, x: number, y: number) => {
   return new Promise<{ file: string; line: number } | null>((resolve) => {
+    const pdfDir = pdfPath.substring(0, pdfPath.lastIndexOf('/'))
     const proc = spawn('synctex', ['edit', '-o', `${page}:${x}:${y}:${pdfPath}`], {
-      env: process.env
+      env: process.env,
+      cwd: pdfDir
     })
     let out = ''
     proc.stdout?.on('data', (d) => { out += d.toString() })
@@ -98,7 +104,15 @@ ipcMain.handle('synctex:editFromPdf', async (_e, pdfPath: string, page: number, 
       const fileMatch = out.match(/Input:(.+)/)
       const lineMatch = out.match(/Line:(\d+)/)
       if (fileMatch && lineMatch) {
-        resolve({ file: fileMatch[1].trim(), line: parseInt(lineMatch[1]) })
+        let filePath = fileMatch[1].trim()
+        // Convert absolute path to relative (strip tmpDir prefix)
+        const syncDir = compilationManager?.dir
+        if (syncDir && filePath.startsWith(syncDir)) {
+          filePath = filePath.slice(syncDir.length).replace(/^\//, '')
+        }
+        // Strip leading ./
+        if (filePath.startsWith('./')) filePath = filePath.slice(2)
+        resolve({ file: filePath, line: parseInt(lineMatch[1]) })
       } else {
         console.log('[synctex] no result:', out.slice(0, 200))
         resolve(null)
@@ -683,12 +697,9 @@ You have MCP tools to interact with Overleaf. Use them proactively.
       }, null, 2))
     ).catch(() => {})
 
-    // Fetch threads + comment contexts in background so editor highlights are correct from the start
-    setTimeout(async () => {
-      if (!overleafSock?.projectData) return
-
-      // Fetch threads (fast REST call) to know which are resolved
-      const threadResult = await overleafFetch(`/project/${projectId}/threads`)
+    // Fetch resolved thread IDs immediately (fast REST call) so editor highlights
+    // don't flash resolved comments while waiting for background fetch
+    overleafFetch(`/project/${projectId}/threads`).then((threadResult) => {
       if (threadResult.ok && threadResult.data) {
         const threads = threadResult.data as Record<string, { resolved?: boolean }>
         const resolvedIds: string[] = []
@@ -697,8 +708,12 @@ You have MCP tools to interact with Overleaf. Use them proactively.
         }
         sendToRenderer('comments:initThreads', { threads: threadResult.data, resolvedIds })
       }
+    }).catch(() => {})
 
-      // Fetch comment contexts from all docs
+    // Fetch comment contexts from all docs in background (slower — joins each doc)
+    setTimeout(async () => {
+      if (!overleafSock?.projectData) return
+
       const { docPathMap: dp } = walkRootFolder(overleafSock.projectData.project.rootFolder)
       const contexts: Record<string, { file: string; text: string; pos: number }> = {}
       for (const [did, rp] of Object.entries(dp)) {
@@ -1159,6 +1174,153 @@ ipcMain.handle('overleaf:socketCompile', async (_e, mainTexRelPath: string) => {
   })
 })
 
+// Server-side compile via Overleaf's CLSI
+ipcMain.handle('overleaf:serverCompile', async (_e, rootDocId?: string) => {
+  if (!overleafSessionCookie || !overleafSock?.projectData) {
+    return { success: false, log: 'Not connected', pdfPath: '' }
+  }
+
+  const projectId = overleafSock.projectData.project._id
+  const effectiveRootDocId = rootDocId || overleafSock.projectData.project.rootDoc_id || null
+
+  // Resolve rootResourcePath (file path of root doc) — matches Overleaf web client
+  let rootResourcePath: string | undefined
+  if (effectiveRootDocId) {
+    const { docPathMap } = walkRootFolder(overleafSock.projectData.project.rootFolder)
+    rootResourcePath = docPathMap[effectiveRootDocId]
+  }
+
+  try {
+    sendToRenderer('latex:log', 'Compiling on Overleaf server...\n')
+
+    const compileBody = JSON.stringify({
+      rootDoc_id: effectiveRootDocId,
+      ...(rootResourcePath && { rootResourcePath }),
+      draft: false,
+      check: 'silent',
+      incrementalCompilesEnabled: true,
+      stopOnFirstError: false
+    })
+
+    const compileResult = await overleafFetch(
+      `/project/${projectId}/compile?auto_compile=false`,
+      { method: 'POST', body: compileBody }
+    )
+
+    if (!compileResult.ok) {
+      sendToRenderer('latex:log', `Compile failed: HTTP ${compileResult.status}\n`)
+      return { success: false, log: '', pdfPath: '' }
+    }
+
+    const data = compileResult.data as any
+
+    // Diagnostic: log compile status and available output files
+    const outputPaths = (data.outputFiles || []).map((f: any) => f.path)
+    sendToRenderer('latex:log', `[CLSI status=${data.status}, outputFiles=[${outputPaths.join(', ')}]]\n`)
+
+    // Build query params for fetching output files (matches Overleaf web client)
+    const params = new URLSearchParams()
+    if (data.compileGroup) params.set('compileGroup', data.compileGroup)
+    if (data.clsiServerId) params.set('clsiserverid', data.clsiServerId)
+
+    const buildOutputUrl = (file: { url: string; build?: string }) => {
+      const base = (file.build && data.pdfDownloadDomain)
+        ? `${data.pdfDownloadDomain}${file.url}`
+        : `https://www.overleaf.com${file.url}`
+      return `${base}?${params}`
+    }
+
+    // Build output dir — separate from synced project dir to avoid re-uploading artifacts
+    const syncDir = compilationManager?.dir || join(require('os').tmpdir(), `lattex-${projectId}`)
+    const buildDir = join(syncDir, '.build')
+    await mkdirAsync(buildDir, { recursive: true })
+
+    // Fetch compile log
+    const logFile = (data.outputFiles || []).find((f: any) => f.path === 'output.log')
+    if (logFile) {
+      try {
+        const logContent = await fetchBinary(buildOutputUrl(logFile))
+        sendToRenderer('latex:log', Buffer.from(logContent).toString('utf-8'))
+      } catch (e) {
+        sendToRenderer('latex:log', `[log fetch failed: ${e}]\n`)
+      }
+    }
+
+    // Grab synctex.gz
+    const synctexFile = (data.outputFiles || []).find((f: any) => f.path === 'output.synctex.gz')
+    if (synctexFile) {
+      try {
+        const d = await fetchBinary(buildOutputUrl(synctexFile))
+        await writeFile(join(buildDir, 'output.synctex.gz'), Buffer.from(d))
+      } catch { /* optional */ }
+    }
+
+    // Download PDF — first check outputFiles, then try direct URL from build ID
+    let pdfPath = ''
+    const pdfFile = (data.outputFiles || []).find((f: any) => f.path === 'output.pdf')
+    if (pdfFile) {
+      try {
+        const pdfData = await fetchBinary(buildOutputUrl(pdfFile))
+        const pdfDest = join(buildDir, 'output.pdf')
+        await writeFile(pdfDest, Buffer.from(pdfData))
+        pdfPath = pdfDest
+      } catch (e) {
+        sendToRenderer('latex:log', `\n[PDF download failed: ${e}]\n`)
+      }
+    }
+
+    // If output.pdf not in outputFiles, try constructing URL from another file's build ID
+    // (CLSI may have produced the PDF but not listed it — output.pdfxref proves this)
+    if (!pdfPath && data.outputFiles?.length > 0) {
+      const refFile = data.outputFiles.find((f: any) => f.build)
+      if (refFile) {
+        const pdfUrl = refFile.url.replace(/\/output\/[^/]+$/, '/output/output.pdf')
+        try {
+          const pdfData = await fetchBinary(buildOutputUrl({ url: pdfUrl, build: refFile.build }))
+          if (pdfData.byteLength > 0) {
+            const pdfDest = join(buildDir, 'output.pdf')
+            await writeFile(pdfDest, Buffer.from(pdfData))
+            pdfPath = pdfDest
+            sendToRenderer('latex:log', `\n[PDF retrieved via direct URL (${(pdfData.byteLength / 1024).toFixed(0)} KB)]\n`)
+          }
+        } catch {
+          // PDF truly not available on CLSI
+        }
+      }
+    }
+
+    if (!pdfPath && data.status !== 'success') {
+      sendToRenderer('latex:log', `\n[Compile status: ${data.status} — PDF not available]\n`)
+    }
+
+    return { success: data.status === 'success', log: '', pdfPath }
+  } catch (e) {
+    const msg = `Server compile error: ${e}`
+    sendToRenderer('latex:log', msg + '\n')
+    return { success: false, log: msg, pdfPath: '' }
+  }
+})
+
+/** Fetch a binary resource. Cookie is optional — CDN URLs use build ID for auth. */
+function fetchBinary(url: string, cookie?: string): Promise<ArrayBuffer> {
+  return new Promise((resolve, reject) => {
+    const req = net.request(url)
+    if (cookie) req.setHeader('Cookie', cookie)
+
+    const chunks: Buffer[] = []
+    req.on('response', (res) => {
+      if (res.statusCode && res.statusCode >= 400) {
+        reject(new Error(`HTTP ${res.statusCode}`))
+        return
+      }
+      res.on('data', (chunk) => chunks.push(chunk as Buffer))
+      res.on('end', () => resolve(Buffer.concat(chunks).buffer))
+    })
+    req.on('error', reject)
+    req.end()
+  })
+}
+
 /// ── Shell: open external ─────────────────────────────────────────
 
 ipcMain.handle('shell:openExternal', async (_e, url: string) => {
@@ -1167,6 +1329,18 @@ ipcMain.handle('shell:openExternal', async (_e, url: string) => {
 
 ipcMain.handle('shell:showInFinder', async (_e, path: string) => {
   shell.showItemInFolder(path)
+})
+
+ipcMain.handle('shell:savePdf', async (_e, sourcePath: string) => {
+  const { canceled, filePath } = await dialog.showSaveDialog({
+    title: 'Save PDF',
+    defaultPath: basename(sourcePath),
+    filters: [{ name: 'PDF', extensions: ['pdf'] }]
+  })
+  if (canceled || !filePath) return { success: false }
+  const { copyFile } = await import('fs/promises')
+  await copyFile(sourcePath, filePath)
+  return { success: true, path: filePath }
 })
 
 // ── App Lifecycle ────────────────────────────────────────────────

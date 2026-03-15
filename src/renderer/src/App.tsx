@@ -219,15 +219,37 @@ export default function App() {
       setStatusMessage('No main document set')
       return
     }
+    state.setCompiling(true)
+    state.clearCompileLog()
+    setStatusMessage('Compiling on server...')
+
+    const result = await window.api.overleafServerCompile(mainDoc)
+
+    if (result.log) {
+      useAppStore.getState().appendCompileLog(result.log)
+    }
+    if (result.pdfPath) {
+      useAppStore.getState().setPdfPath(result.pdfPath)
+    }
+    useAppStore.getState().setCompiling(false)
+    setStatusMessage(result.success ? 'Compiled successfully' : 'Compilation had errors — check Log tab')
+  }
+
+  const handleLocalCompile = async () => {
+    const state = useAppStore.getState()
+    const mainDoc = state.mainDocument || state.overleafProject?.rootDocId
+    if (!mainDoc) {
+      setStatusMessage('No main document set')
+      return
+    }
     const relPath = state.docPathMap[mainDoc] || mainDoc
     state.setCompiling(true)
     state.clearCompileLog()
-    setStatusMessage('Compiling...')
+    setStatusMessage('Compiling locally...')
 
     const result = await window.api.overleafSocketCompile(relPath)
 
-    const storeLog = useAppStore.getState().compileLog
-    if (!storeLog && result.log) {
+    if (!useAppStore.getState().compileLog && result.log) {
       useAppStore.getState().appendCompileLog(result.log)
     }
     if (result.pdfPath) {
@@ -358,7 +380,7 @@ export default function App() {
     <ErrorBoundary>
       <ModalProvider />
       <div className="app">
-        <Toolbar onCompile={handleCompile} onBack={handleBackToProjects} />
+        <Toolbar onCompile={handleCompile} onLocalCompile={handleLocalCompile} onBack={handleBackToProjects} />
         <div className="main-content">
           <PanelGroup direction="horizontal">
             {showFileTree && (

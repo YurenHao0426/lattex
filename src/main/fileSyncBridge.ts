@@ -138,7 +138,7 @@ export class FileSyncBridge {
       atomic: true,
       ignored: [
         /(^|[/\\])\../, // dotfiles
-        /\.(aux|log|fls|fdb_latexmk|synctex\.gz|bbl|blg|out|toc|lof|lot|nav|snm|vrb)$/ // LaTeX output files (not pdf!)
+        /\.(aux|log|fls|fdb_latexmk|synctex\.gz|bbl|blg|out|toc|lof|lot|nav|snm|vrb|pdf|pdfxref|stderr|stdout|chktex)$/ // LaTeX output files
       ]
     })
 
@@ -832,7 +832,7 @@ export class FileSyncBridge {
     for (const relPath of allFiles) {
       if (this.pathDocMap[relPath] || this.pathFileRefMap[relPath]) continue
       // Skip LaTeX output files
-      if (/\.(aux|log|fls|fdb_latexmk|synctex\.gz|bbl|blg|out|toc|lof|lot|nav|snm|vrb|pdf|synctex)/.test(relPath)) continue
+      if (/\.(aux|log|fls|fdb_latexmk|synctex\.gz|bbl|blg|out|toc|lof|lot|nav|snm|vrb|pdf|pdfxref|stderr|stdout|chktex|synctex)/.test(relPath)) continue
       if (/(^|[/\\])\./.test(relPath)) continue
 
       bridgeLog(`[FileSyncBridge] orphaned file found: ${relPath}`)
@@ -851,7 +851,7 @@ export class FileSyncBridge {
     if (this.writesInProgress.has(relPath)) return
 
     // Skip LaTeX output files and dotfiles (same as chokidar ignored)
-    if (/\.(aux|log|fls|fdb_latexmk|synctex\.gz|bbl|blg|out|toc|lof|lot|nav|snm|vrb)$/.test(relPath)) return
+    if (/\.(aux|log|fls|fdb_latexmk|synctex\.gz|bbl|blg|out|toc|lof|lot|nav|snm|vrb|pdf|pdfxref|stderr|stdout|chktex)$/.test(relPath)) return
     if (/(^|[/\\])\./.test(relPath)) return
 
     // Debounce 1s to let the tool finish writing

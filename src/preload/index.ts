@@ -128,6 +128,10 @@ const api = {
     ipcRenderer.invoke('overleaf:socketCompile', mainTexRelPath) as Promise<{
       success: boolean; log: string; pdfPath: string
     }>,
+  overleafServerCompile: (rootDocId?: string) =>
+    ipcRenderer.invoke('overleaf:serverCompile', rootDocId) as Promise<{
+      success: boolean; log: string; pdfPath: string
+    }>,
   overleafRenameEntity: (projectId: string, entityType: string, entityId: string, newName: string) =>
     ipcRenderer.invoke('overleaf:renameEntity', projectId, entityType, entityId, newName) as Promise<{ success: boolean; message?: string }>,
   overleafDeleteEntity: (projectId: string, entityType: string, entityId: string) =>
@@ -201,7 +205,9 @@ const api = {
 
   // Shell
   openExternal: (url: string) => ipcRenderer.invoke('shell:openExternal', url),
-  showInFinder: (path: string) => ipcRenderer.invoke('shell:showInFinder', path)
+  showInFinder: (path: string) => ipcRenderer.invoke('shell:showInFinder', path),
+  savePdf: (sourcePath: string) =>
+    ipcRenderer.invoke('shell:savePdf', sourcePath) as Promise<{ success: boolean; path?: string }>
 }
 
 contextBridge.exposeInMainWorld('api', api)

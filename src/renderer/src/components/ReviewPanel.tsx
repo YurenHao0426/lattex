@@ -123,7 +123,7 @@ export default function ReviewPanel() {
             }
           })
           const store = useAppStore.getState()
-          store.setResolvedThreadIds(new Set([...store.resolvedThreadIds, threadId]))
+          store.setResolvedThreadIds(new Set([...(store.resolvedThreadIds || []), threadId]))
           break
         }
         case 'reopen-thread': {
@@ -137,7 +137,7 @@ export default function ReviewPanel() {
             return { ...prev, [threadId]: t }
           })
           const store = useAppStore.getState()
-          const ids = new Set(store.resolvedThreadIds)
+          const ids = new Set(store.resolvedThreadIds || [])
           ids.delete(threadId)
           store.setResolvedThreadIds(ids)
           break
@@ -154,7 +154,7 @@ export default function ReviewPanel() {
           const newCtx = { ...store.commentContexts }
           delete newCtx[threadId]
           store.setCommentContexts(newCtx)
-          const ids = new Set(store.resolvedThreadIds)
+          const ids = new Set(store.resolvedThreadIds || [])
           ids.delete(threadId)
           store.setResolvedThreadIds(ids)
           break
@@ -228,7 +228,7 @@ export default function ReviewPanel() {
       return { ...prev, [threadId]: { ...prev[threadId], resolved: true, resolved_at: new Date().toISOString() } }
     })
     const store = useAppStore.getState()
-    store.setResolvedThreadIds(new Set([...store.resolvedThreadIds, threadId]))
+    store.setResolvedThreadIds(new Set([...(store.resolvedThreadIds || []), threadId]))
     await window.api.overleafResolveThread(overleafProjectId, threadId, getDocIdForThread(threadId))
   }
 
@@ -244,7 +244,7 @@ export default function ReviewPanel() {
       return { ...prev, [threadId]: t }
     })
     const store = useAppStore.getState()
-    const ids = new Set(store.resolvedThreadIds)
+    const ids = new Set(store.resolvedThreadIds || [])
     ids.delete(threadId)
     store.setResolvedThreadIds(ids)
     await window.api.overleafReopenThread(overleafProjectId, threadId, getDocIdForThread(threadId))
@@ -307,7 +307,7 @@ export default function ReviewPanel() {
     const newCtx = { ...store.commentContexts }
     delete newCtx[threadId]
     store.setCommentContexts(newCtx)
-    const ids = new Set(store.resolvedThreadIds)
+    const ids = new Set(store.resolvedThreadIds || [])
     ids.delete(threadId)
     store.setResolvedThreadIds(ids)
 
