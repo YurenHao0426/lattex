@@ -670,13 +670,26 @@ You have MCP tools to interact with Overleaf. Use them proactively.
 
 ### Project
 - **list_project_files**: List all files with sizes.
-- **compile_latex**: Trigger LaTeX compilation. Pass \`main_file\` if needed.
 
-### Comment Workflow
+### Compilation
+- **compile_latex**: Trigger LaTeX compilation on Overleaf server. Returns status + error summary.
+- **get_compile_errors**: Get parsed errors from last compile (file, line, message).
+- **get_compile_warnings**: Get parsed warnings from last compile.
+- **get_compile_log**: Get full raw log. Pass \`tail: N\` for last N lines only.
+
+### Workflows
+
+#### Comment Workflow
 1. Use \`get_comments\` to see what reviewers have flagged
 2. Edit the .tex files to address the feedback
 3. Use \`reply_to_comment\` to explain what you changed
 4. Use \`resolve_comment\` to mark it as done
+
+#### Compile-Debug Workflow
+1. Edit .tex files
+2. Use \`compile_latex\` to compile
+3. If errors: use \`get_compile_errors\` for details, fix them, recompile
+4. If warnings: use \`get_compile_warnings\` to review
 `).catch(() => {})
     // Write .claude/settings.json to auto-allow MCP tools
     mkdirAsync(join(tmpDir, '.claude'), { recursive: true }).then(() =>
@@ -691,7 +704,10 @@ You have MCP tools to interact with Overleaf. Use them proactively.
             'mcp__lattex__get_chat_messages',
             'mcp__lattex__send_chat_message',
             'mcp__lattex__list_project_files',
-            'mcp__lattex__compile_latex'
+            'mcp__lattex__compile_latex',
+            'mcp__lattex__get_compile_errors',
+            'mcp__lattex__get_compile_warnings',
+            'mcp__lattex__get_compile_log'
           ]
         }
       }, null, 2))

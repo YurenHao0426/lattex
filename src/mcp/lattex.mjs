@@ -4,7 +4,7 @@
 
 // MCP Server: LatteX
 // Provides tools for Claude Code to interact with the Overleaf project:
-// comments, chat, file listing, compilation
+// comments, chat, file listing, compilation + debugging
 
 import { Server } from '@modelcontextprotocol/sdk/server/index.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
@@ -30,7 +30,11 @@ function readState() {
   }
 }
 
-// ── HTTP helper ────────────────────────────────────────────────
+// Last compile result — cached so get_compile_errors/warnings/log can access it
+let lastCompileLog = null   // string
+let lastCompileStatus = null // string
+
+// ── HTTP helpers ──────────────────────────────────────────────
 
 function overleafRequest(method, path, cookie, csrf, body) {
   return new Promise((resolve, reject) => {
@@ -73,6 +77,142 @@ function overleafRequest(method, path, cookie, csrf, body) {
     if (body) req.write(JSON.stringify(body))
     req.end()
   })
+}
+
+/** Fetch binary/text content from a full URL (for CDN downloads) */
+function fetchUrl(url) {
+  return new Promise((resolve, reject) => {
+    const parsed = new URL(url)
+    const options = {
+      hostname: parsed.hostname,
+      path: parsed.pathname + parsed.search,
+      method: 'GET',
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36'
+      }
+    }
+
+    const req = https.request(options, (res) => {
+      const chunks = []
+      res.on('data', (chunk) => chunks.push(chunk))
+      res.on('end', () => {
+        const buf = Buffer.concat(chunks)
+        resolve({
+          ok: res.statusCode >= 200 && res.statusCode < 300,
+          status: res.statusCode,
+          data: buf.toString('utf-8')
+        })
+      })
+    })
+    req.on('error', reject)
+    req.end()
+  })
+}
+
+// ── Log parsing ──────────────────────────────────────────────
+
+function parseCompileLog(raw) {
+  const entries = []
+  const lines = raw.split('\n')
+
+  for (let i = 0; i < lines.length; i++) {
+    const ln = lines[i]
+
+    // LaTeX Error: ! ...
+    if (/^!/.test(ln) || /LaTeX Error:/.test(ln)) {
+      let msg = ln.replace(/^!\s*/, '')
+      while (i + 1 < lines.length && lines[i + 1] && !lines[i + 1].startsWith('l.') && !lines[i + 1].startsWith('!')) {
+        i++
+        if (lines[i].trim()) msg += ' ' + lines[i].trim()
+      }
+      let lineNum = undefined
+      if (i + 1 < lines.length && /^l\.(\d+)/.test(lines[i + 1])) {
+        i++
+        lineNum = parseInt(lines[i].match(/^l\.(\d+)/)[1])
+      }
+      entries.push({ level: 'error', message: msg.trim(), line: lineNum })
+      continue
+    }
+
+    // file:line: error pattern
+    const fileLineErr = ln.match(/^\.\/(.+?):(\d+):\s*(.+)/)
+    if (fileLineErr) {
+      const msg = fileLineErr[3]
+      const isWarning = /warning/i.test(msg)
+      entries.push({
+        level: isWarning ? 'warning' : 'error',
+        message: msg,
+        file: fileLineErr[1],
+        line: parseInt(fileLineErr[2])
+      })
+      continue
+    }
+
+    // Package ... Warning:
+    const pkgWarn = ln.match(/Package (\S+) Warning:\s*(.*)/)
+    if (pkgWarn) {
+      let msg = `[${pkgWarn[1]}] ${pkgWarn[2]}`
+      let warnLine = undefined
+      while (i + 1 < lines.length && /^\(/.test(lines[i + 1])) {
+        i++
+        const contLine = lines[i]
+        msg += ' ' + contLine.replace(/^\([^)]*\)\s*/, '').trim()
+        const lineMatch = contLine.match(/on input line (\d+)/)
+        if (lineMatch) warnLine = parseInt(lineMatch[1])
+      }
+      if (!warnLine) {
+        const lineMatch = msg.match(/on input line (\d+)/)
+        if (lineMatch) warnLine = parseInt(lineMatch[1])
+      }
+      entries.push({ level: 'warning', message: msg.trim(), line: warnLine })
+      continue
+    }
+
+    // LaTeX Warning:
+    const latexWarn = ln.match(/LaTeX Warning:\s*(.*)/)
+    if (latexWarn) {
+      let msg = latexWarn[1]
+      while (i + 1 < lines.length && lines[i + 1] && !lines[i + 1].match(/^[(!.]/) && lines[i + 1].startsWith(' ')) {
+        i++
+        msg += ' ' + lines[i].trim()
+      }
+      const lineMatch = msg.match(/on input line (\d+)/)
+      entries.push({ level: 'warning', message: msg.trim(), line: lineMatch ? parseInt(lineMatch[1]) : undefined })
+      continue
+    }
+
+    // Overfull / Underfull
+    const overunder = ln.match(/^(Overfull|Underfull) .* at lines (\d+)--(\d+)/)
+    if (overunder) {
+      entries.push({ level: 'warning', message: ln.trim(), line: parseInt(overunder[2]) })
+      continue
+    }
+    if (/^(Overfull|Underfull)/.test(ln)) {
+      const paraMatch = ln.match(/in paragraph at lines (\d+)--(\d+)/)
+      entries.push({ level: 'warning', message: ln.trim(), line: paraMatch ? parseInt(paraMatch[1]) : undefined })
+      continue
+    }
+
+    // Missing file
+    if (/File .* not found/.test(ln)) {
+      entries.push({ level: 'error', message: ln.trim() })
+      continue
+    }
+  }
+
+  // Deduplicate
+  const seen = new Set()
+  return entries.filter((e) => {
+    const key = `${e.level}:${e.message}`
+    if (seen.has(key)) return false
+    seen.add(key)
+    return true
+  })
+}
+
+function formatEntry(e) {
+  const loc = [e.file, e.line].filter(Boolean).join(':')
+  return `[${e.level.toUpperCase()}]${loc ? ` ${loc}:` : ''} ${e.message}`
 }
 
 // ── Helpers ────────────────────────────────────────────────────
@@ -121,6 +261,62 @@ function walkDir(dir, base) {
     }
   } catch { /* skip */ }
   return results
+}
+
+/** Build CLSI output file URL from compile response data */
+function buildOutputUrl(file, data) {
+  const params = new URLSearchParams()
+  if (data.compileGroup) params.set('compileGroup', data.compileGroup)
+  if (data.clsiServerId) params.set('clsiserverid', data.clsiServerId)
+  const base = (file.build && data.pdfDownloadDomain)
+    ? `${data.pdfDownloadDomain}${file.url}`
+    : `https://www.overleaf.com${file.url}`
+  return `${base}?${params}`
+}
+
+// ── Compile + fetch log helper ──────────────────────────────
+
+async function compileAndFetchLog(projectId, cookie, csrf, pathDocMap, mainFile) {
+  const body = {
+    check: 'silent',
+    draft: false,
+    incrementalCompilesEnabled: true,
+    rootDoc_id: null,
+    stopOnFirstError: false
+  }
+
+  if (mainFile && pathDocMap) {
+    const docId = pathDocMap[mainFile]
+    if (docId) body.rootDoc_id = docId
+  }
+
+  const result = await overleafRequest(
+    'POST',
+    `/project/${projectId}/compile?auto_compile=false`,
+    cookie,
+    csrf,
+    body
+  )
+
+  if (!result.ok) {
+    throw new Error(`Compilation request failed: HTTP ${result.status}`)
+  }
+
+  const compileData = result.data
+  lastCompileStatus = compileData?.status || 'unknown'
+
+  // Fetch the log via CDN URL
+  const outputFiles = compileData?.outputFiles || []
+  const logFile = outputFiles.find(f => f.path === 'output.log')
+  if (logFile) {
+    const logUrl = buildOutputUrl(logFile, compileData)
+    const logResult = await fetchUrl(logUrl)
+    if (logResult.ok) {
+      lastCompileLog = logResult.data
+    }
+  }
+
+  return { status: lastCompileStatus, hasLog: !!lastCompileLog }
 }
 
 // ── Tool definitions ───────────────────────────────────────────
@@ -243,9 +439,10 @@ const TOOLS = [
       properties: {}
     }
   },
+  // ── Compilation ──
   {
     name: 'compile_latex',
-    description: 'Trigger LaTeX compilation of the project. Returns compilation status and log output.',
+    description: 'Trigger LaTeX compilation on Overleaf server. Returns status and a summary of errors/warnings. Use get_compile_errors, get_compile_warnings, or get_compile_log for details.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -255,13 +452,42 @@ const TOOLS = [
         }
       }
     }
+  },
+  {
+    name: 'get_compile_errors',
+    description: 'Get LaTeX errors from the last compilation. Returns parsed error messages with file paths and line numbers. Run compile_latex first.',
+    inputSchema: {
+      type: 'object',
+      properties: {}
+    }
+  },
+  {
+    name: 'get_compile_warnings',
+    description: 'Get LaTeX warnings from the last compilation. Returns parsed warnings with file paths and line numbers. Run compile_latex first.',
+    inputSchema: {
+      type: 'object',
+      properties: {}
+    }
+  },
+  {
+    name: 'get_compile_log',
+    description: 'Get the full raw LaTeX compilation log from the last compile. Run compile_latex first. Warning: can be very large.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        tail: {
+          type: 'number',
+          description: 'Only return the last N lines of the log. Useful for large logs. Default: return all.'
+        }
+      }
+    }
   }
 ]
 
 // ── Server ─────────────────────────────────────────────────────
 
 const server = new Server(
-  { name: 'lattex', version: '2.0.0' },
+  { name: 'lattex', version: '3.0.0' },
   { capabilities: { tools: {} } }
 )
 
@@ -472,9 +698,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         }
 
         const lines = files.map(f => {
-          if (f.isDir) return `📁 ${f.path}`
+          if (f.isDir) return `  ${f.path}`
           const sizeKb = (f.size / 1024).toFixed(1)
-          return `   ${f.path} (${sizeKb} KB)`
+          return `  ${f.path} (${sizeKb} KB)`
         })
 
         return textResult(
@@ -482,68 +708,104 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         )
       }
 
+      // ── Compilation ───────────────────────────────
+
       case 'compile_latex': {
-        // Compilation happens via the LatteX app's local LaTeX installation
-        // We trigger it by writing a signal file that the app watches,
-        // or we can call the Overleaf compile endpoint
         const mainFile = args?.main_file || null
 
-        // Use Overleaf's server-side compilation
-        const body = {
-          check: 'silent',
-          draft: false,
-          incrementalCompilesEnabled: true,
-          rootDoc_id: null,
-          stopOnFirstError: false
-        }
-
-        // If a specific main file is given, find its docId
-        if (mainFile && pathDocMap) {
-          const docId = pathDocMap[mainFile]
-          if (docId) body.rootDoc_id = docId
-        }
-
-        const result = await overleafRequest(
-          'POST',
-          `/project/${projectId}/compile`,
-          cookie,
-          csrf,
-          body
-        )
-
-        if (!result.ok) {
-          return errorResult(`Compilation request failed: HTTP ${result.status}`)
-        }
-
-        const compileData = result.data
-        const status = compileData?.status || 'unknown'
+        const { status } = await compileAndFetchLog(projectId, cookie, csrf, pathDocMap, mainFile)
 
         if (status === 'success') {
-          return textResult('Compilation successful.')
-        } else if (status === 'failure' || status === 'error') {
-          // Try to extract error info from output files
-          const outputFiles = compileData?.outputFiles || []
-          const logFile = outputFiles.find(f => f.path === 'output.log')
-          if (logFile) {
-            // Fetch the log
-            const logUrl = `/project/${projectId}/output/${logFile.path}?build=${logFile.build}`
-            const logResult = await overleafRequest('GET', logUrl, cookie, csrf)
-            if (logResult.ok && typeof logResult.data === 'string') {
-              // Extract just the error lines
-              const logLines = logResult.data.split('\n')
-              const errorLines = logLines.filter(l =>
-                l.startsWith('!') || l.includes('Error') || l.includes('error')
-              ).slice(0, 20)
-
+          // Parse warnings for summary
+          if (lastCompileLog) {
+            const entries = parseCompileLog(lastCompileLog)
+            const warnings = entries.filter(e => e.level === 'warning')
+            if (warnings.length > 0) {
               return textResult(
-                `Compilation failed.\n\nErrors:\n${errorLines.join('\n') || 'See full log for details.'}`
+                `Compilation successful with ${warnings.length} warning(s). Use get_compile_warnings for details.`
               )
             }
           }
-          return textResult(`Compilation failed with status: ${status}`)
-        } else {
-          return textResult(`Compilation status: ${status}`)
+          return textResult('Compilation successful. No errors or warnings.')
         }
+
+        // Failed — parse and summarize
+        if (lastCompileLog) {
+          const entries = parseCompileLog(lastCompileLog)
+          const errors = entries.filter(e => e.level === 'error')
+          const warnings = entries.filter(e => e.level === 'warning')
+
+          const summary = [`Compilation failed (status: ${status}).`]
+          if (errors.length > 0) {
+            summary.push(`\n${errors.length} error(s):`)
+            for (const e of errors.slice(0, 10)) {
+              summary.push(`  ${formatEntry(e)}`)
+            }
+            if (errors.length > 10) summary.push(`  ... and ${errors.length - 10} more`)
+          }
+          if (warnings.length > 0) {
+            summary.push(`\n${warnings.length} warning(s) — use get_compile_warnings for details.`)
+          }
+          if (errors.length === 0) {
+            summary.push('\nNo LaTeX errors found in log. Use get_compile_log to inspect the raw output.')
+          }
+          return textResult(summary.join('\n'))
+        }
+
+        return textResult(`Compilation failed with status: ${status}. No log available.`)
+      }
+
+      case 'get_compile_errors': {
+        if (!lastCompileLog) {
+          return textResult('No compile log available. Run compile_latex first.')
+        }
+
+        const entries = parseCompileLog(lastCompileLog)
+        const errors = entries.filter(e => e.level === 'error')
+
+        if (errors.length === 0) {
+          return textResult(`Last compile status: ${lastCompileStatus}. No errors found in log.`)
+        }
+
+        const lines = errors.map(formatEntry)
+        return textResult(
+          `${errors.length} error(s) (last compile: ${lastCompileStatus}):\n\n${lines.join('\n')}`
+        )
+      }
+
+      case 'get_compile_warnings': {
+        if (!lastCompileLog) {
+          return textResult('No compile log available. Run compile_latex first.')
+        }
+
+        const entries = parseCompileLog(lastCompileLog)
+        const warnings = entries.filter(e => e.level === 'warning')
+
+        if (warnings.length === 0) {
+          return textResult(`Last compile status: ${lastCompileStatus}. No warnings found in log.`)
+        }
+
+        const lines = warnings.map(formatEntry)
+        return textResult(
+          `${warnings.length} warning(s) (last compile: ${lastCompileStatus}):\n\n${lines.join('\n')}`
+        )
+      }
+
+      case 'get_compile_log': {
+        if (!lastCompileLog) {
+          return textResult('No compile log available. Run compile_latex first.')
+        }
+
+        let log = lastCompileLog
+        const tail = args?.tail
+        if (tail && tail > 0) {
+          const lines = log.split('\n')
+          log = lines.slice(-tail).join('\n')
+        }
+
+        return textResult(
+          `Compile log (status: ${lastCompileStatus}):\n\n${log}`
+        )
       }
 
       default:
