@@ -1407,7 +1407,8 @@ app.whenReady().then(async () => {
 
 app.on('window-all-closed', () => {
   mainWindow = null
-  ptyInstance?.kill()
+  for (const inst of ptyInstances.values()) inst.kill()
+  ptyInstances.clear()
   fileSyncBridge?.stop()
   fileSyncBridge = null
   overleafSock?.disconnect()
