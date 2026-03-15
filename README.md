@@ -12,7 +12,7 @@
 
 - **Real-time Overleaf sync** — WebSocket-based OT collaboration, live co-editing
 - **Bidirectional file sync** — edit `.tex` files on disk (e.g. with Claude Code in the integrated terminal) and changes sync to Overleaf automatically
-- **Claude Code MCP integration** — built-in MCP server lets Claude Code read comments, compile, debug, and chat with collaborators
+- **Claude Code ready** — built-in MCP server for seamless [Claude Code](https://docs.anthropic.com/en/docs/claude-code) integration (see below)
 - **Local LaTeX compilation** — compile PDFs locally with `latexmk`, no Overleaf compile limits
 - **PDF viewer** — built-in viewer with SyncTeX forward/inverse search, pinch-to-zoom, text search
 - **Search** — in-file find/replace (Cmd+F), multi-file search (Cmd+Shift+F), PDF text search
@@ -33,27 +33,29 @@ Download the latest `.dmg` from [Releases](https://github.com/YurenHao0426/latte
 - macOS (Apple Silicon)
 - [TeX Live](https://www.tug.org/texlive/) or [MacTeX](https://www.tug.org/mactex/) for local compilation
 
-## Claude Code Integration
+## Recommended: Claude Code
 
-LatteX has built-in [Claude Code](https://docs.anthropic.com/en/docs/claude-code) integration via MCP (Model Context Protocol). When you open a project, LatteX automatically:
+We recommend using [Claude Code](https://docs.anthropic.com/en/docs/claude-code) for AI-assisted LaTeX writing. Install it separately, then use it directly in LatteX's integrated terminal — LatteX provides seamless integration out of the box.
 
-1. Syncs all project files to a local temp directory
-2. Writes a `.mcp.json` config that registers the LatteX MCP server
-3. Writes `.claude/CLAUDE.md` with project context and tool documentation
-4. Pre-approves all MCP tool permissions in `.claude/settings.json`
+When you open a project, LatteX automatically configures everything Claude Code needs:
+
+- `.mcp.json` — registers the LatteX MCP server so Claude Code can interact with Overleaf
+- `.claude/CLAUDE.md` — project context and tool documentation
+- `.claude/settings.json` — pre-approved MCP tool permissions (no manual approval needed)
 
 ### Usage
 
-1. Open a project in LatteX
-2. Open the integrated terminal (Cmd+`)
-3. Run `claude` — Claude Code auto-discovers the MCP server and has full access to the project
+1. [Install Claude Code](https://docs.anthropic.com/en/docs/claude-code) if you haven't already
+2. Open a project in LatteX
+3. Open the integrated terminal (Cmd+\`)
+4. Run `claude` — it auto-discovers the MCP server, no configuration needed
 
-Claude Code can then:
-- **Edit `.tex` files** directly on disk — changes sync to Overleaf in real-time via bidirectional file sync
-- **Read and respond to comments** — `get_comments`, `reply_to_comment`, `resolve_comment`
-- **Compile and debug** — `compile_latex`, `get_compile_errors`, `get_compile_warnings`
-- **Use project chat** — `get_chat_messages`, `send_chat_message`
-- **List project files** — `list_project_files`
+Claude Code can edit `.tex` files directly — changes sync to Overleaf in real-time. In addition, the MCP server gives Claude Code extra capabilities beyond file editing:
+
+- **Comments** — read, reply to, resolve, reopen, or delete reviewer comments
+- **Compilation** — trigger server-side compilation, inspect errors and warnings
+- **Project chat** — read and send messages to collaborators
+- **File listing** — list all project files with sizes
 
 ### Available MCP Tools
 
@@ -86,7 +88,7 @@ Claude: [calls get_comments] I see 3 comments...
         [calls compile_latex] Compilation successful, no errors.
 ```
 
-No configuration needed — everything is set up automatically when you open a project.
+No configuration needed — LatteX sets everything up automatically when you open a project.
 
 ## Development
 
