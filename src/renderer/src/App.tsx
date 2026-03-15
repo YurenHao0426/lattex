@@ -111,6 +111,15 @@ export default function App() {
       }
     })
 
+    // Listen for initial comment data (threads + contexts) from background fetch on connect
+    const unsubInitThreads = window.api.onCommentsInitThreads?.((data) => {
+      const store = useAppStore.getState()
+      store.setResolvedThreadIds(new Set(data.resolvedIds))
+    })
+    const unsubInitContexts = window.api.onCommentsInitContexts?.((data) => {
+      useAppStore.getState().setCommentContexts(data.contexts)
+    })
+
     // Listen for remote cursor updates
     const unsubCursorUpdate = window.api.onCursorRemoteUpdate((raw) => {
       const data = raw as {
@@ -168,6 +177,8 @@ export default function App() {
       unsubRejoined()
       unsubExternalEdit()
       unsubNewDoc()
+      unsubInitThreads?.()
+      unsubInitContexts?.()
       unsubCursorUpdate()
       unsubCursorDisconnected()
       remoteCursors.clear()

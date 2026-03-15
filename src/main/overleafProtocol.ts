@@ -65,15 +65,20 @@ export function parseSocketMessage(raw: string): ParsedMessage | null {
       return null
     }
     case '6': {
-      // Ack: 6:::N+[jsonData]
-      const ackMatch = raw.match(/^6:::(\d+)\+([\s\S]*)/)
-      if (ackMatch) {
+      // Ack with data: 6:::N+[jsonData]
+      // Ack without data: 6:::N
+      const ackWithData = raw.match(/^6:::(\d+)\+([\s\S]*)/)
+      if (ackWithData) {
         try {
-          const data = JSON.parse(ackMatch[2])
-          return { type: 'ack', id: parseInt(ackMatch[1]), data }
+          const data = JSON.parse(ackWithData[2])
+          return { type: 'ack', id: parseInt(ackWithData[1]), data }
         } catch {
-          return { type: 'ack', id: parseInt(ackMatch[1]), data: null }
+          return { type: 'ack', id: parseInt(ackWithData[1]), data: null }
         }
+      }
+      const ackNoData = raw.match(/^6:::(\d+)$/)
+      if (ackNoData) {
+        return { type: 'ack', id: parseInt(ackNoData[1]), data: null }
       }
       return null
     }

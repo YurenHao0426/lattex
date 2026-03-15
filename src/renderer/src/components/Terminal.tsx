@@ -124,39 +124,78 @@ function TerminalInstance({ id, cwd, cmd, args, visible }: {
   )
 }
 
+interface TabInfo {
+  id: string
+  name: string
+}
+
+let nextTabId = 0
+
 export default function Terminal() {
-  const [mode, setMode] = useState<'terminal' | 'claude'>('terminal')
-  const [claudeSpawned, setClaudeSpawned] = useState(false)
+  const [tabs, setTabs] = useState<TabInfo[]>(() => [
+    { id: `term-${++nextTabId}`, name: 'Terminal' }
+  ])
+  const [activeTabId, setActiveTabId] = useState(() => `term-${nextTabId}`)
   const syncDir = useAppStore((s) => s.syncDir) || '/tmp'
 
-  const launchClaude = useCallback(() => {
-    setClaudeSpawned(true)
-    setMode('claude')
+  const addTab = useCallback(() => {
+    const id = `term-${++nextTabId}`
+    setTabs((prev) => {
+      const name = `Terminal ${prev.length + 1}`
+      return [...prev, { id, name }]
+    })
+    setActiveTabId(id)
   }, [])
+
+  const closeTab = useCallback((tabId: string) => {
+    setTabs((prev) => {
+      if (prev.length <= 1) return prev
+      const idx = prev.findIndex((t) => t.id === tabId)
+      const next = prev.filter((t) => t.id !== tabId)
+      // If closing the active tab, switch to adjacent
+      if (tabId === activeTabId) {
+        const newIdx = Math.min(idx, next.length - 1)
+        setActiveTabId(next[newIdx].id)
+      }
+      return next
+    })
+  }, [activeTabId])
 
   return (
     <div className="terminal-panel">
       <div className="terminal-toolbar">
-        <button
-          className={`pdf-tab ${mode === 'terminal' ? 'active' : ''}`}
-          onClick={() => setMode('terminal')}
-        >
-          Terminal
-        </button>
-        <button
-          className={`pdf-tab ${mode === 'claude' ? 'active' : ''}`}
-          onClick={launchClaude}
-        >
-          Claude
-        </button>
-        <div className="pdf-toolbar-spacer" />
-        <QuickActions ptyId={claudeSpawned ? 'claude' : 'terminal'} />
+        <QuickActions ptyId={activeTabId} />
       </div>
 
-      <TerminalInstance id="terminal" cwd={syncDir} visible={mode === 'terminal'} />
-      {claudeSpawned && (
-        <TerminalInstance id="claude" cwd={syncDir} args={['-l', '-c', 'claude']} visible={mode === 'claude'} />
-      )}
+      {tabs.map((tab) => (
+        <TerminalInstance
+          key={tab.id}
+          id={tab.id}
+          cwd={syncDir}
+          visible={tab.id === activeTabId}
+        />
+      ))}
+
+      <div className="terminal-tab-bar">
+        {tabs.map((tab) => (
+          <div
+            key={tab.id}
+            className={`terminal-tab ${tab.id === activeTabId ? 'active' : ''}`}
+            onClick={() => setActiveTabId(tab.id)}
+          >
+            <span className="terminal-tab-name">{tab.name}</span>
+            {tabs.length > 1 && (
+              <span
+                className="terminal-tab-close"
+                onClick={(e) => { e.stopPropagation(); closeTab(tab.id) }}
+              >
+                ×
+              </span>
+            )}
+          </div>
+        ))}
+        <button className="terminal-tab-add" onClick={addTab}>+</button>
+      </div>
     </div>
   )
 }

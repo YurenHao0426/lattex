@@ -79,6 +79,7 @@ export default function Editor() {
 
   const pendingGoTo = useAppStore((s) => s.pendingGoTo)
   const commentContexts = useAppStore((s) => s.commentContexts)
+  const resolvedThreadIds = useAppStore((s) => s.resolvedThreadIds)
   const hoveredThreadId = useAppStore((s) => s.hoveredThreadId)
   const overleafProjectId = useAppStore((s) => s.overleafProjectId)
   const pathDocMap = useAppStore((s) => s.pathDocMap)
@@ -118,10 +119,18 @@ export default function Editor() {
     )
     setSubmittingComment(false)
     if (result.success) {
+      // Add context immediately so highlight + review panel update without re-fetch
+      if (result.threadId && activeTab) {
+        const store = useAppStore.getState()
+        store.setCommentContexts({
+          ...store.commentContexts,
+          [result.threadId]: { file: activeTab, text: newComment.text, pos: newComment.from }
+        })
+      }
       setNewComment(null)
       setCommentInput('')
     }
-  }, [newComment, commentInput, overleafProjectId, getDocIdForFile])
+  }, [newComment, commentInput, overleafProjectId, activeTab, getDocIdForFile])
 
   // Handle goTo when file is already open
   useEffect(() => {
@@ -325,12 +334,12 @@ export default function Editor() {
     }
   }, [activeTab, pathDocMap])
 
-  // Sync comment ranges to CodeMirror
+  // Sync comment ranges to CodeMirror (exclude resolved threads)
   useEffect(() => {
     if (!viewRef.current || !activeTab) return
     const ranges: CommentRange[] = []
     for (const [threadId, ctx] of Object.entries(commentContexts)) {
-      if (ctx.file === activeTab && ctx.text) {
+      if (ctx.file === activeTab && ctx.text && !resolvedThreadIds.has(threadId)) {
         ranges.push({
           threadId,
           from: ctx.pos,
@@ -340,7 +349,7 @@ export default function Editor() {
       }
     }
     viewRef.current.dispatch({ effects: setCommentRangesEffect.of(ranges) })
-  }, [commentContexts, activeTab])
+  }, [commentContexts, activeTab, resolvedThreadIds])
 
   // Sync hover state
   useEffect(() => {

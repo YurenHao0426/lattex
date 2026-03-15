@@ -301,11 +301,8 @@ export class OverleafSocket extends EventEmitter {
     this.joinedDocs.delete(docId)
   }
 
-  async applyOtUpdate(docId: string, ops: unknown[], version: number, hash: string): Promise<void> {
-    // Use emitWithAck so the server's callback response comes back as a Socket.IO ack
-    // Do NOT send hash — Overleaf's document-updater hash check causes disconnect + rollback on mismatch
-    const result = await this.emitWithAck('applyOtUpdate', [docId, { doc: docId, op: ops, v: version }])
-    if (result) console.log(`[applyOtUpdate] ack for ${docId} v=${version}`)
+  async applyOtUpdate(docId: string, ops: unknown[], version: number, hash?: string): Promise<void> {
+    await this.emitWithAck('applyOtUpdate', [docId, { doc: docId, op: ops, v: version }])
   }
 
   /** Get list of connected users with their cursor positions */

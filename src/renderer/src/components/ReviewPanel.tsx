@@ -45,24 +45,36 @@ export default function ReviewPanel() {
   const [editText, setEditText] = useState('')
   const threadRefs = useRef<Record<string, HTMLDivElement | null>>({})
 
+  // Initial fetch — threads from REST, contexts only if not cached
   const fetchThreads = useCallback(async () => {
     if (!overleafProjectId) return
     setLoading(true)
     setError('')
 
-    const [threadResult, ctxResult] = await Promise.all([
-      window.api.overleafGetThreads(overleafProjectId),
-      window.api.otFetchAllCommentContexts()
-    ])
+    const hasContexts = Object.keys(useAppStore.getState().commentContexts).length > 0
 
+    const threadPromise = window.api.overleafGetThreads(overleafProjectId)
+    const ctxPromise = !hasContexts ? window.api.otFetchAllCommentContexts() : null
+
+    const threadResult = await threadPromise
     setLoading(false)
     if (threadResult.success && threadResult.threads) {
-      setThreads(threadResult.threads as ThreadMap)
+      const tm = threadResult.threads as ThreadMap
+      setThreads(tm)
+      const resolved = new Set<string>()
+      for (const [tid, t] of Object.entries(tm)) {
+        if (t.resolved) resolved.add(tid)
+      }
+      useAppStore.getState().setResolvedThreadIds(resolved)
     } else {
       setError(threadResult.message || 'Failed to fetch comments')
     }
-    if (ctxResult.success && ctxResult.contexts) {
-      useAppStore.getState().setCommentContexts(ctxResult.contexts)
+
+    if (ctxPromise) {
+      const ctxResult = await ctxPromise
+      if (ctxResult.success && ctxResult.contexts) {
+        useAppStore.getState().setCommentContexts(ctxResult.contexts)
+      }
     }
   }, [overleafProjectId])
 
@@ -70,38 +82,188 @@ export default function ReviewPanel() {
     fetchThreads()
   }, [fetchThreads])
 
+  // Handle real-time comment events from Overleaf socket — update state locally
+  useEffect(() => {
+    if (!window.api.onCommentsEvent) return
+    return window.api.onCommentsEvent((event) => {
+      const { type, args } = event
+      switch (type) {
+        case 'new-comment': {
+          const threadId = args[0] as string
+          const comment = args[1] as Message
+          setThreads(prev => {
+            if (prev[threadId]) {
+              // Reply to existing thread
+              return {
+                ...prev,
+                [threadId]: {
+                  ...prev[threadId],
+                  messages: [...prev[threadId].messages, comment]
+                }
+              }
+            }
+            // New thread — add it
+            return { ...prev, [threadId]: { messages: [comment] } }
+          })
+          break
+        }
+        case 'resolve-thread': {
+          const threadId = args[0] as string
+          const user = args[1] as User | undefined
+          setThreads(prev => {
+            if (!prev[threadId]) return prev
+            return {
+              ...prev,
+              [threadId]: {
+                ...prev[threadId],
+                resolved: true,
+                resolved_by_user: user,
+                resolved_at: new Date().toISOString()
+              }
+            }
+          })
+          const store = useAppStore.getState()
+          store.setResolvedThreadIds(new Set([...store.resolvedThreadIds, threadId]))
+          break
+        }
+        case 'reopen-thread': {
+          const threadId = args[0] as string
+          setThreads(prev => {
+            if (!prev[threadId]) return prev
+            const t = { ...prev[threadId] }
+            delete t.resolved
+            delete t.resolved_by_user
+            delete t.resolved_at
+            return { ...prev, [threadId]: t }
+          })
+          const store = useAppStore.getState()
+          const ids = new Set(store.resolvedThreadIds)
+          ids.delete(threadId)
+          store.setResolvedThreadIds(ids)
+          break
+        }
+        case 'delete-thread': {
+          const threadId = args[0] as string
+          setThreads(prev => {
+            const next = { ...prev }
+            delete next[threadId]
+            return next
+          })
+          // Remove context so highlight disappears
+          const store = useAppStore.getState()
+          const newCtx = { ...store.commentContexts }
+          delete newCtx[threadId]
+          store.setCommentContexts(newCtx)
+          const ids = new Set(store.resolvedThreadIds)
+          ids.delete(threadId)
+          store.setResolvedThreadIds(ids)
+          break
+        }
+        case 'edit-message': {
+          const threadId = args[0] as string
+          const messageId = args[1] as string
+          const content = args[2] as string
+          setThreads(prev => {
+            if (!prev[threadId]) return prev
+            return {
+              ...prev,
+              [threadId]: {
+                ...prev[threadId],
+                messages: prev[threadId].messages.map(m =>
+                  m.id === messageId ? { ...m, content } : m
+                )
+              }
+            }
+          })
+          break
+        }
+        case 'delete-message': {
+          const threadId = args[0] as string
+          const messageId = args[1] as string
+          setThreads(prev => {
+            if (!prev[threadId]) return prev
+            return {
+              ...prev,
+              [threadId]: {
+                ...prev[threadId],
+                messages: prev[threadId].messages.filter(m => m.id !== messageId)
+              }
+            }
+          })
+          break
+        }
+      }
+    })
+  }, [])
+
   useEffect(() => {
     if (!focusedThreadId) return
     const el = threadRefs.current[focusedThreadId]
     if (el) el.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
   }, [focusedThreadId])
 
+  // --- Local actions: optimistic updates, no REST re-fetch ---
+
   const handleReply = async (threadId: string) => {
     if (!replyText.trim() || !overleafProjectId) return
-    const result = await window.api.overleafReplyThread(overleafProjectId, threadId, replyText.trim())
-    if (result.success) {
-      setReplyText('')
-      setReplyingTo(null)
-      fetchThreads()
-    }
+    const content = replyText.trim()
+    setReplyText('')
+    setReplyingTo(null)
+    // Server will broadcast new-comment event which updates state
+    await window.api.overleafReplyThread(overleafProjectId, threadId, content)
+  }
+
+  const getDocIdForThread = (threadId: string): string | undefined => {
+    const ctx = contexts[threadId]
+    if (!ctx) return undefined
+    const { pathDocMap } = useAppStore.getState()
+    return pathDocMap[ctx.file]
   }
 
   const handleResolve = async (threadId: string) => {
     if (!overleafProjectId) return
-    await window.api.overleafResolveThread(overleafProjectId, threadId)
-    fetchThreads()
+    // Optimistic: mark resolved immediately
+    setThreads(prev => {
+      if (!prev[threadId]) return prev
+      return { ...prev, [threadId]: { ...prev[threadId], resolved: true, resolved_at: new Date().toISOString() } }
+    })
+    const store = useAppStore.getState()
+    store.setResolvedThreadIds(new Set([...store.resolvedThreadIds, threadId]))
+    await window.api.overleafResolveThread(overleafProjectId, threadId, getDocIdForThread(threadId))
   }
 
   const handleReopen = async (threadId: string) => {
     if (!overleafProjectId) return
-    await window.api.overleafReopenThread(overleafProjectId, threadId)
-    fetchThreads()
+    // Optimistic: mark unresolved immediately
+    setThreads(prev => {
+      if (!prev[threadId]) return prev
+      const t = { ...prev[threadId] }
+      delete t.resolved
+      delete t.resolved_by_user
+      delete t.resolved_at
+      return { ...prev, [threadId]: t }
+    })
+    const store = useAppStore.getState()
+    const ids = new Set(store.resolvedThreadIds)
+    ids.delete(threadId)
+    store.setResolvedThreadIds(ids)
+    await window.api.overleafReopenThread(overleafProjectId, threadId, getDocIdForThread(threadId))
   }
 
   const handleDeleteMessage = async (threadId: string, messageId: string) => {
     if (!overleafProjectId) return
+    // Optimistic: remove message immediately
+    setThreads(prev => {
+      if (!prev[threadId]) return prev
+      return {
+        ...prev,
+        [threadId]: {
+          ...prev[threadId],
+          messages: prev[threadId].messages.filter(m => m.id !== messageId)
+        }
+      }
+    })
     await window.api.overleafDeleteMessage(overleafProjectId, threadId, messageId)
-    fetchThreads()
   }
 
   const handleStartEdit = (threadId: string, msg: Message) => {
@@ -111,25 +273,51 @@ export default function ReviewPanel() {
 
   const handleSaveEdit = async () => {
     if (!editingMsg || !editText.trim() || !overleafProjectId) return
-    await window.api.overleafEditMessage(overleafProjectId, editingMsg.threadId, editingMsg.messageId, editText.trim())
+    const { threadId, messageId } = editingMsg
+    const content = editText.trim()
+    // Optimistic: update message immediately
+    setThreads(prev => {
+      if (!prev[threadId]) return prev
+      return {
+        ...prev,
+        [threadId]: {
+          ...prev[threadId],
+          messages: prev[threadId].messages.map(m =>
+            m.id === messageId ? { ...m, content } : m
+          )
+        }
+      }
+    })
     setEditingMsg(null)
     setEditText('')
-    fetchThreads()
+    await window.api.overleafEditMessage(overleafProjectId, threadId, messageId, content)
   }
 
   const handleDeleteThread = async (threadId: string) => {
     if (!overleafProjectId) return
     const ctx = contexts[threadId]
     const store = useAppStore.getState()
+
+    // Optimistic: remove thread, context, and highlight immediately
+    setThreads(prev => {
+      const next = { ...prev }
+      delete next[threadId]
+      return next
+    })
+    const newCtx = { ...store.commentContexts }
+    delete newCtx[threadId]
+    store.setCommentContexts(newCtx)
+    const ids = new Set(store.resolvedThreadIds)
+    ids.delete(threadId)
+    store.setResolvedThreadIds(ids)
+
     if (ctx) {
       const docId = store.pathDocMap[ctx.file]
       if (docId) {
         await window.api.overleafDeleteThread(overleafProjectId, docId, threadId)
-        fetchThreads()
         return
       }
     }
-    fetchThreads()
   }
 
   const getUserName = (msg: Message) => {
@@ -137,7 +325,7 @@ export default function ReviewPanel() {
       return msg.user.last_name ? `${msg.user.first_name} ${msg.user.last_name}` : msg.user.first_name
     }
     if (msg.user?.email) return msg.user.email.split('@')[0]
-    return msg.user_id.slice(-6)
+    return msg.user_id?.slice(-6) || '?'
   }
 
   const formatTime = (ts: number) => {
@@ -154,12 +342,10 @@ export default function ReviewPanel() {
     return d.toLocaleDateString()
   }
 
-  // Navigate to comment position — always works for current file since it's already open
   const handleClickContext = (threadId: string) => {
     const ctx = contexts[threadId]
     if (!ctx) return
     const store = useAppStore.getState()
-    // File should already be open since we only show current file's comments
     store.setPendingGoTo({ file: ctx.file, pos: ctx.pos, highlight: ctx.text })
   }
 
@@ -172,7 +358,6 @@ export default function ReviewPanel() {
     )
   }
 
-  // Filter threads to only show ones belonging to the current file
   const threadEntries = Object.entries(threads)
   const fileThreads = activeTab
     ? threadEntries.filter(([threadId]) => {

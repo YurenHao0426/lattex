@@ -43,10 +43,10 @@ const api = {
     ipcRenderer.invoke('overleaf:getThreads', projectId) as Promise<{ success: boolean; threads?: Record<string, unknown>; message?: string }>,
   overleafReplyThread: (projectId: string, threadId: string, content: string) =>
     ipcRenderer.invoke('overleaf:replyThread', projectId, threadId, content) as Promise<{ success: boolean }>,
-  overleafResolveThread: (projectId: string, threadId: string) =>
-    ipcRenderer.invoke('overleaf:resolveThread', projectId, threadId) as Promise<{ success: boolean }>,
-  overleafReopenThread: (projectId: string, threadId: string) =>
-    ipcRenderer.invoke('overleaf:reopenThread', projectId, threadId) as Promise<{ success: boolean }>,
+  overleafResolveThread: (projectId: string, threadId: string, docId?: string) =>
+    ipcRenderer.invoke('overleaf:resolveThread', projectId, threadId, docId) as Promise<{ success: boolean }>,
+  overleafReopenThread: (projectId: string, threadId: string, docId?: string) =>
+    ipcRenderer.invoke('overleaf:reopenThread', projectId, threadId, docId) as Promise<{ success: boolean }>,
   overleafDeleteMessage: (projectId: string, threadId: string, messageId: string) =>
     ipcRenderer.invoke('overleaf:deleteMessage', projectId, threadId, messageId) as Promise<{ success: boolean }>,
   overleafEditMessage: (projectId: string, threadId: string, messageId: string, content: string) =>
@@ -180,6 +180,23 @@ const api = {
     const handler = (_e: Electron.IpcRendererEvent, msg: unknown) => cb(msg)
     ipcRenderer.on('chat:newMessage', handler)
     return () => ipcRenderer.removeListener('chat:newMessage', handler)
+  },
+
+  // Comments real-time events
+  onCommentsEvent: (cb: (event: { type: string; args: unknown[] }) => void) => {
+    const handler = (_e: Electron.IpcRendererEvent, event: { type: string; args: unknown[] }) => cb(event)
+    ipcRenderer.on('comments:event', handler)
+    return () => ipcRenderer.removeListener('comments:event', handler)
+  },
+  onCommentsInitThreads: (cb: (data: { threads: Record<string, unknown>; resolvedIds: string[] }) => void) => {
+    const handler = (_e: Electron.IpcRendererEvent, data: { threads: Record<string, unknown>; resolvedIds: string[] }) => cb(data)
+    ipcRenderer.on('comments:initThreads', handler)
+    return () => ipcRenderer.removeListener('comments:initThreads', handler)
+  },
+  onCommentsInitContexts: (cb: (data: { contexts: Record<string, { file: string; text: string; pos: number }> }) => void) => {
+    const handler = (_e: Electron.IpcRendererEvent, data: { contexts: Record<string, { file: string; text: string; pos: number }> }) => cb(data)
+    ipcRenderer.on('comments:initContexts', handler)
+    return () => ipcRenderer.removeListener('comments:initContexts', handler)
   },
 
   // Shell

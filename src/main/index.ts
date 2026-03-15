@@ -3,7 +3,7 @@
 
 import { app, BrowserWindow, ipcMain, dialog, shell, net } from 'electron'
 import { join, basename } from 'path'
-import { readFile, writeFile } from 'fs/promises'
+import { readFile, writeFile, mkdir as mkdirAsync, unlink } from 'fs/promises'
 import { spawn } from 'child_process'
 import * as pty from 'node-pty'
 import { OverleafSocket, type RootFolder, type SubFolder, type JoinDocResult } from './overleafSocket'
@@ -15,6 +15,24 @@ const ptyInstances = new Map<string, pty.IPty>()
 let overleafSock: OverleafSocket | null = null
 let compilationManager: CompilationManager | null = null
 let fileSyncBridge: FileSyncBridge | null = null
+let mcpStateDir = ''           // syncDir for .lattex-mcp.json
+let mcpProjectId = ''
+let mcpCommentContexts: Record<string, { file: string; text: string; pos: number }> = {}
+let mcpPathDocMap: Record<string, string> = {}  // relPath → docId for MCP
+
+async function writeMcpState(): Promise<void> {
+  if (!mcpStateDir || !mcpProjectId) return
+  try {
+    const state = {
+      projectId: mcpProjectId,
+      cookie: overleafSessionCookie,
+      csrf: overleafCsrfToken,
+      commentContexts: mcpCommentContexts,
+      pathDocMap: mcpPathDocMap
+    }
+    await writeFile(join(mcpStateDir, '.lattex-mcp.json'), JSON.stringify(state, null, 2))
+  } catch { /* ignore */ }
+}
 
 function createWindow(): void {
   mainWindow = new BrowserWindow({
@@ -44,6 +62,7 @@ function sendToRenderer(channel: string, ...args: unknown[]) {
     mainWindow.webContents.send(channel, ...args)
   }
 }
+
 
 ipcMain.handle('fs:readFile', async (_e, filePath: string) => {
   return readFile(filePath, 'utf-8')
@@ -359,22 +378,27 @@ ipcMain.handle('overleaf:replyThread', async (_e, projectId: string, threadId: s
 })
 
 // Resolve a thread
-ipcMain.handle('overleaf:resolveThread', async (_e, projectId: string, threadId: string) => {
+ipcMain.handle('overleaf:resolveThread', async (_e, projectId: string, threadId: string, docId?: string) => {
   if (!overleafSessionCookie) return { success: false }
-  const result = await overleafFetch(`/project/${projectId}/thread/${threadId}/resolve`, {
+  // docId is required in the URL path for resolve
+  const docSegment = docId ? `/doc/${docId}` : ''
+  const result = await overleafFetch(`/project/${projectId}${docSegment}/thread/${threadId}/resolve`, {
     method: 'POST',
     body: '{}'
   })
+  if (!result.ok) console.log(`[resolveThread] failed: ${result.status}`, result.data)
   return { success: result.ok }
 })
 
 // Reopen a thread
-ipcMain.handle('overleaf:reopenThread', async (_e, projectId: string, threadId: string) => {
+ipcMain.handle('overleaf:reopenThread', async (_e, projectId: string, threadId: string, docId?: string) => {
   if (!overleafSessionCookie) return { success: false }
-  const result = await overleafFetch(`/project/${projectId}/thread/${threadId}/reopen`, {
+  const docSegment = docId ? `/doc/${docId}` : ''
+  const result = await overleafFetch(`/project/${projectId}${docSegment}/thread/${threadId}/reopen`, {
     method: 'POST',
     body: '{}'
   })
+  if (!result.ok) console.log(`[reopenThread] failed: ${result.status}`, result.data)
   return { success: result.ok }
 })
 
@@ -406,7 +430,7 @@ ipcMain.handle('overleaf:deleteThread', async (_e, projectId: string, docId: str
   return { success: result.ok }
 })
 
-// Add a new comment: create thread via REST then submit op via Socket.IO
+// Add a new comment: create thread via REST then submit comment op via existing socket
 async function addComment(
   projectId: string,
   docId: string,
@@ -415,6 +439,7 @@ async function addComment(
   content: string
 ): Promise<{ success: boolean; threadId?: string; message?: string }> {
   if (!overleafSessionCookie) return { success: false, message: 'not_logged_in' }
+  if (!overleafSock) return { success: false, message: 'not_connected' }
 
   // Generate a random threadId (24-char hex like Mongo ObjectId)
   const threadId = Array.from({ length: 24 }, () => Math.floor(Math.random() * 16).toString(16)).join('')
@@ -426,123 +451,29 @@ async function addComment(
   })
   if (!msgResult.ok) return { success: false, message: `REST failed: ${msgResult.status}` }
 
-  // Step 2: Submit the comment op via Socket.IO WebSocket
-  const hsRes = await overleafFetch(`/socket.io/1/?t=${Date.now()}&projectId=${projectId}`, { raw: true })
-  if (!hsRes.ok) return { success: false, message: 'handshake failed' }
-  const sid = (hsRes.data as string).split(':')[0]
-  if (!sid) return { success: false, message: 'no sid' }
-
-  const { session: electronSession } = await import('electron')
-  const ses = electronSession.fromPartition('overleaf-sio-add-' + Date.now())
-
-  ses.webRequest.onHeadersReceived((details, callback) => {
-    const headers = { ...details.responseHeaders }
-    delete headers['set-cookie']
-    delete headers['Set-Cookie']
-    callback({ responseHeaders: headers })
-  })
-
-  const allCookieParts = overleafSessionCookie.split('; ')
-  for (const sc of hsRes.setCookies) {
-    allCookieParts.push(sc.split(';')[0])
-  }
-  for (const pair of allCookieParts) {
-    const eqIdx = pair.indexOf('=')
-    if (eqIdx < 0) continue
-    try {
-      await ses.cookies.set({
-        url: 'https://www.overleaf.com',
-        name: pair.substring(0, eqIdx),
-        value: pair.substring(eqIdx + 1),
-        domain: '.overleaf.com',
-        path: '/',
-        secure: true
-      })
-    } catch { /* ignore */ }
-  }
-
-  const win = new BrowserWindow({
-    width: 800, height: 600, show: false,
-    webPreferences: { nodeIntegration: false, contextIsolation: false, session: ses }
-  })
-
+  // Step 2: Submit the comment op via the existing socket connection
   try {
-    win.webContents.on('console-message', (_e, _level, msg) => {
-      console.log('[overleaf-add-comment]', msg)
-    })
-    await win.loadURL('https://www.overleaf.com/login')
+    // Join doc if not already joined, to get the current version
+    const alreadyJoined = docEventHandlers.has(docId)
+    const joinResult = await overleafSock.joinDoc(docId)
+    const version = joinResult.version
 
-    const script = `
-      new Promise(async (mainResolve) => {
-        try {
-          var ws = new WebSocket('wss://' + location.host + '/socket.io/1/websocket/${sid}');
-          var ackId = 0, ackCbs = {}, evtCbs = {};
+    // Send the comment op
+    const commentOp = { c: text, p: pos, t: threadId }
+    console.log('[addComment] submitting op:', JSON.stringify(commentOp), 'v:', version)
 
-          ws.onmessage = function(e) {
-            var d = e.data;
-            if (d === '2::') { ws.send('2::'); return; }
-            if (d === '1::') return;
-            var am = d.match(/^6:::(\\d+)\\+([\\s\\S]*)/);
-            if (am) {
-              var cb = ackCbs[parseInt(am[1])];
-              if (cb) { delete ackCbs[parseInt(am[1])]; try { cb(JSON.parse(am[2])); } catch(e2) { cb(null); } }
-              return;
-            }
-            var em2 = d.match(/^5:::(\\{[\\s\\S]*\\})/);
-            if (em2) {
-              try {
-                var evt = JSON.parse(em2[1]);
-                var ecb = evtCbs[evt.name];
-                if (ecb) { delete evtCbs[evt.name]; ecb(evt.args); }
-              } catch(e3) {}
-            }
-          };
+    await overleafSock.applyOtUpdate(docId, [commentOp], version, '')
+    console.log('[addComment] op applied successfully')
 
-          function emitAck(name, args) {
-            return new Promise(function(res) { ackId++; ackCbs[ackId] = res;
-              ws.send('5:' + ackId + '+::' + JSON.stringify({ name: name, args: args })); });
-          }
-          function waitEvent(name) {
-            return new Promise(function(res) { evtCbs[name] = res; });
-          }
+    // Leave doc if we joined it just for this
+    if (!alreadyJoined) {
+      await overleafSock.leaveDoc(docId)
+    }
 
-          ws.onerror = function() { mainResolve({ error: 'ws_error' }); };
-          ws.onclose = function(ev) { console.log('ws closed: ' + ev.code); };
-
-          ws.onopen = async function() {
-            try {
-              var jpPromise = waitEvent('joinProjectResponse');
-              ws.send('5:::' + JSON.stringify({ name: 'joinProject', args: [{ project_id: '${projectId}' }] }));
-              await jpPromise;
-
-              // Join the doc to submit the op
-              await emitAck('joinDoc', ['${docId}']);
-
-              // Submit the comment op
-              var commentOp = { c: ${JSON.stringify(text)}, p: ${pos}, t: '${threadId}' };
-              console.log('submitting op: ' + JSON.stringify(commentOp));
-              await emitAck('applyOtUpdate', ['${docId}', { doc: '${docId}', op: [commentOp], v: 0 }]);
-
-              await emitAck('leaveDoc', ['${docId}']);
-              ws.close();
-              mainResolve({ success: true });
-            } catch (e) { ws.close(); mainResolve({ error: e.message }); }
-          };
-          setTimeout(function() { ws.close(); mainResolve({ error: 'timeout' }); }, 30000);
-        } catch (e) { mainResolve({ error: e.message }); }
-      });
-    `
-
-    const result = await win.webContents.executeJavaScript(script)
-    console.log('[overleaf] addComment result:', result)
-
-    if (result?.error) return { success: false, message: result.error }
     return { success: true, threadId }
   } catch (e) {
-    console.log('[overleaf] addComment error:', e)
+    console.log('[addComment] error:', e)
     return { success: false, message: String(e) }
-  } finally {
-    win.close()
   }
 }
 
@@ -663,6 +594,15 @@ ipcMain.handle('ot:connect', async (_e, projectId: string) => {
         sendToRenderer('cursor:remoteDisconnected', args[0])
       } else if (name === 'new-chat-message') {
         sendToRenderer('chat:newMessage', args[0])
+      } else if (
+        name === 'new-comment' ||
+        name === 'resolve-thread' ||
+        name === 'reopen-thread' ||
+        name === 'delete-thread' ||
+        name === 'edit-message' ||
+        name === 'delete-message'
+      ) {
+        sendToRenderer('comments:event', { type: name, args })
       }
     })
 
@@ -676,6 +616,107 @@ ipcMain.handle('ot:connect', async (_e, projectId: string) => {
     const tmpDir = compilationManager.dir
     fileSyncBridge = new FileSyncBridge(overleafSock, tmpDir, docPathMap, pathDocMap, fileRefs, mainWindow!, projectId, overleafSessionCookie, overleafCsrfToken)
     await fileSyncBridge.start()
+
+    // Write MCP state + config for Claude Code integration
+    mcpStateDir = tmpDir
+    mcpProjectId = projectId
+    mcpCommentContexts = {}
+    mcpPathDocMap = pathDocMap
+    writeMcpState()
+    // Write .mcp.json so Claude Code auto-discovers the MCP server
+    const appRoot = app.isPackaged ? join(app.getAppPath(), '..') : join(__dirname, '..', '..')
+    const mcpServerPath = join(appRoot, 'src', 'mcp', 'lattex.mjs')
+    writeFile(join(tmpDir, '.mcp.json'), JSON.stringify({
+      mcpServers: {
+        lattex: {
+          command: 'node',
+          args: [mcpServerPath]
+        }
+      }
+    }, null, 2)).catch(() => {})
+    // Write CLAUDE.md with project context
+    writeFile(join(tmpDir, 'CLAUDE.md'), `# LatteX Project — Overleaf Integration
+
+This is a LaTeX project synced from Overleaf via LatteX. Files here are bidirectionally synced — edits you make will appear on Overleaf.
+
+## MCP Tools
+
+You have MCP tools to interact with Overleaf. Use them proactively.
+
+### Comments
+- **get_comments**: Read comments. Pass \`file\` to filter, \`include_resolved\` for all.
+- **resolve_comment**: Resolve a comment by \`thread_id\`.
+- **reopen_comment**: Reopen a resolved comment.
+- **reply_to_comment**: Reply to a comment thread.
+- **delete_comment**: Permanently delete a comment thread.
+
+### Chat
+- **get_chat_messages**: Read project chat history.
+- **send_chat_message**: Send a message to project chat.
+
+### Project
+- **list_project_files**: List all files with sizes.
+- **compile_latex**: Trigger LaTeX compilation. Pass \`main_file\` if needed.
+
+### Comment Workflow
+1. Use \`get_comments\` to see what reviewers have flagged
+2. Edit the .tex files to address the feedback
+3. Use \`reply_to_comment\` to explain what you changed
+4. Use \`resolve_comment\` to mark it as done
+`).catch(() => {})
+    // Write .claude/settings.json to auto-allow MCP tools
+    mkdirAsync(join(tmpDir, '.claude'), { recursive: true }).then(() =>
+      writeFile(join(tmpDir, '.claude', 'settings.json'), JSON.stringify({
+        permissions: {
+          allow: [
+            'mcp__lattex__get_comments',
+            'mcp__lattex__resolve_comment',
+            'mcp__lattex__reopen_comment',
+            'mcp__lattex__reply_to_comment',
+            'mcp__lattex__delete_comment',
+            'mcp__lattex__get_chat_messages',
+            'mcp__lattex__send_chat_message',
+            'mcp__lattex__list_project_files',
+            'mcp__lattex__compile_latex'
+          ]
+        }
+      }, null, 2))
+    ).catch(() => {})
+
+    // Fetch threads + comment contexts in background so editor highlights are correct from the start
+    setTimeout(async () => {
+      if (!overleafSock?.projectData) return
+
+      // Fetch threads (fast REST call) to know which are resolved
+      const threadResult = await overleafFetch(`/project/${projectId}/threads`)
+      if (threadResult.ok && threadResult.data) {
+        const threads = threadResult.data as Record<string, { resolved?: boolean }>
+        const resolvedIds: string[] = []
+        for (const [tid, t] of Object.entries(threads)) {
+          if (t.resolved) resolvedIds.push(tid)
+        }
+        sendToRenderer('comments:initThreads', { threads: threadResult.data, resolvedIds })
+      }
+
+      // Fetch comment contexts from all docs
+      const { docPathMap: dp } = walkRootFolder(overleafSock.projectData.project.rootFolder)
+      const contexts: Record<string, { file: string; text: string; pos: number }> = {}
+      for (const [did, rp] of Object.entries(dp)) {
+        try {
+          const alreadyJoined = docEventHandlers.has(did)
+          const result = await overleafSock.joinDoc(did)
+          if (result.ranges?.comments) {
+            for (const c of result.ranges.comments) {
+              if (c.op?.t) contexts[c.op.t] = { file: rp, text: c.op.c || '', pos: c.op.p || 0 }
+            }
+          }
+          if (!alreadyJoined) await overleafSock.leaveDoc(did)
+        } catch { /* ignore */ }
+      }
+      mcpCommentContexts = contexts
+      writeMcpState()
+      sendToRenderer('comments:initContexts', { contexts })
+    }, 3000)
 
     return {
       success: true,
@@ -697,6 +738,14 @@ ipcMain.handle('ot:connect', async (_e, projectId: string) => {
 })
 
 ipcMain.handle('ot:disconnect', async () => {
+  // Clean up MCP state file
+  if (mcpStateDir) {
+    unlink(join(mcpStateDir, '.lattex-mcp.json')).catch(() => {})
+  }
+  mcpStateDir = ''
+  mcpProjectId = ''
+  mcpCommentContexts = {}
+
   await fileSyncBridge?.stop()
   fileSyncBridge = null
   overleafSock?.disconnect()
@@ -1059,6 +1108,10 @@ ipcMain.handle('ot:fetchAllCommentContexts', async () => {
       console.log(`[fetchCommentContexts] failed for ${relPath}:`, e)
     }
   }
+
+  // Update MCP state with fresh comment contexts
+  mcpCommentContexts = contexts
+  writeMcpState()
 
   return { success: true, contexts }
 })
