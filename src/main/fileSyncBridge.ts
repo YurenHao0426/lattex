@@ -509,8 +509,10 @@ export class FileSyncBridge {
 
     if (this.editorDocs.has(docId)) {
       // Doc is open in editor → send to renderer via IPC
+      // Don't update lastKnownContent here — let the renderer confirm via syncContentChanged.
+      // This prevents race conditions where remote OT ops overwrite lastKnownContent
+      // before the disk change is fully processed through the editor's OT pipeline.
       bridgeLog(`[FileSyncBridge] → sending sync:externalEdit to renderer for ${relPath}`)
-      this.lastKnownContent.set(relPath, newContent)
       this.mainWindow.webContents.send('sync:externalEdit', { docId, content: newContent })
     } else {
       // Doc NOT open in editor → bridge handles OT directly
@@ -723,6 +725,14 @@ export class FileSyncBridge {
     const relPath = this.docPathMap[docId]
     if (!relPath) return
 
+    // If there's a pending debounce for this file, an external tool (e.g. Claude Code)
+    // just wrote to disk and the change hasn't been processed yet. Don't overwrite the
+    // disk file or update lastKnownContent — let processDocChange handle it.
+    if (this.debounceTimers.has(relPath)) {
+      bridgeLog(`[FileSyncBridge] onEditorContentChanged: skipping ${relPath} (pending disk change)`)
+      return
+    }
+
     // Update last known content
     this.lastKnownContent.set(relPath, content)
 
@@ -778,7 +788,7 @@ export class FileSyncBridge {
 
     setTimeout(() => {
       this.writesInProgress.delete(relPath)
-    }, 150)
+    }, 800)  // Must exceed chokidar polling interval (500ms)
   }
 
   private async deleteFromDisk(relPath: string): Promise<void> {
