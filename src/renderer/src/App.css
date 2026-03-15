@@ -1337,6 +1337,7 @@ html, body, #root {
   align-items: center;
   gap: 8px;
   background: #EDE5CE;
+  user-select: none;
 }
 
 .pdf-page {

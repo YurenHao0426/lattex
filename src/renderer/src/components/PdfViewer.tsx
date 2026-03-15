@@ -214,9 +214,11 @@ export default function PdfViewer() {
 
   // SyncTeX: double-click PDF → jump to source
   const handlePdfDoubleClick = useCallback(async (e: MouseEvent) => {
+    e.preventDefault()
+    e.stopPropagation()
     if (!pdfPath) { console.log('[synctex-ui] no pdfPath'); return }
     const canvas = (e.target as HTMLElement).closest('canvas.pdf-page') as HTMLCanvasElement | null
-    if (!canvas) { console.log('[synctex-ui] no canvas target'); return }
+    if (!canvas) { console.log('[synctex-ui] no canvas target, target was:', (e.target as HTMLElement).tagName, (e.target as HTMLElement).className); return }
 
     const container = containerRef.current
     if (!container) return
