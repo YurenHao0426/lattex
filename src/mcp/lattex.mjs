@@ -12,7 +12,7 @@ import {
   CallToolRequestSchema,
   ListToolsRequestSchema
 } from '@modelcontextprotocol/sdk/types.js'
-import { readFileSync, readdirSync, statSync } from 'fs'
+import { readFileSync, readdirSync, statSync, writeFileSync, existsSync, unlinkSync } from 'fs'
 import { join, relative } from 'path'
 import https from 'https'
 
@@ -277,6 +277,11 @@ function buildOutputUrl(file, data) {
 // ── Compile + fetch log helper ──────────────────────────────
 
 async function compileAndFetchLog(projectId, cookie, csrf, pathDocMap, mainFile) {
+  // Flush in-memory OT changes to database so CLSI sees latest content
+  try {
+    await overleafRequest('POST', `/project/${projectId}/flush`, cookie, csrf)
+  } catch {}
+
   const body = {
     check: 'silent',
     draft: false,
@@ -712,11 +717,59 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case 'compile_latex': {
         const mainFile = args?.main_file || null
+        const cwd = process.cwd()
+        const requestPath = join(cwd, '.lattex-compile-request')
+        const resultPath = join(cwd, '.lattex-compile-result')
 
-        const { status } = await compileAndFetchLog(projectId, cookie, csrf, pathDocMap, mainFile)
+        // Clean up any stale result file
+        try { unlinkSync(resultPath) } catch {}
 
-        if (status === 'success') {
-          // Parse warnings for summary
+        // Write compile request for the main process to pick up
+        const requestId = Date.now().toString(36) + Math.random().toString(36).slice(2, 6)
+        writeFileSync(requestPath, JSON.stringify({
+          requestId,
+          mainFile,
+          timestamp: Date.now()
+        }))
+
+        // Poll for result (main process compiles + downloads PDF + updates UI)
+        const timeout = 120000 // 2 minutes max
+        const pollInterval = 500
+        const start = Date.now()
+        let result = null
+
+        while (Date.now() - start < timeout) {
+          await new Promise(r => setTimeout(r, pollInterval))
+          try {
+            if (existsSync(resultPath)) {
+              result = JSON.parse(readFileSync(resultPath, 'utf-8'))
+              unlinkSync(resultPath)
+              break
+            }
+          } catch {}
+        }
+
+        if (!result) {
+          // Timeout — fall back to direct compile
+          try { unlinkSync(requestPath) } catch {}
+          const { status } = await compileAndFetchLog(projectId, cookie, csrf, pathDocMap, mainFile)
+          lastCompileStatus = status
+          if (status === 'success') {
+            return textResult('Compilation successful (direct, UI may not have updated).')
+          }
+          return textResult(`Compilation failed (status: ${status}). Use get_compile_log for details.`)
+        }
+
+        // Read compile log written by main process (avoids redundant compile API call)
+        lastCompileStatus = result.status || (result.success ? 'success' : 'failure')
+        const logPath = join(cwd, '.lattex-compile-log')
+        try {
+          lastCompileLog = readFileSync(logPath, 'utf-8')
+        } catch {
+          lastCompileLog = null
+        }
+
+        if (result.success) {
           if (lastCompileLog) {
             const entries = parseCompileLog(lastCompileLog)
             const warnings = entries.filter(e => e.level === 'warning')
@@ -735,7 +788,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           const errors = entries.filter(e => e.level === 'error')
           const warnings = entries.filter(e => e.level === 'warning')
 
-          const summary = [`Compilation failed (status: ${status}).`]
+          const summary = [`Compilation failed (status: ${result.status || 'failure'}).`]
           if (errors.length > 0) {
             summary.push(`\n${errors.length} error(s):`)
             for (const e of errors.slice(0, 10)) {
@@ -752,7 +805,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           return textResult(summary.join('\n'))
         }
 
-        return textResult(`Compilation failed with status: ${status}. No log available.`)
+        return textResult(`Compilation failed (status: ${result.status || 'failure'}). No log available.`)
       }
 
       case 'get_compile_errors': {

@@ -300,7 +300,14 @@ export default function Editor() {
     return () => {
       if (docSyncRef.current) {
         const docId = pathDocMap[activeTab!]
-        if (docId) activeDocSyncs.delete(docId)
+        if (docId) {
+          activeDocSyncs.delete(docId)
+          // Tell bridge to take back OT ownership for this doc.
+          // Without this, the bridge thinks the renderer still handles it
+          // and defers disk-change processing — but the docSync is about to
+          // be destroyed, so disk changes would be silently dropped.
+          window.api.otLeaveDoc(docId)
+        }
         docSyncRef.current.destroy()
         docSyncRef.current = null
       }

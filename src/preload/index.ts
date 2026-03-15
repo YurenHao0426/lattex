@@ -160,13 +160,25 @@ const api = {
   sha1: (text: string): string => createHash('sha1').update(text).digest('hex'),
 
   // File sync bridge
-  onSyncExternalEdit: (cb: (data: { docId: string; content: string }) => void) => {
-    const handler = (_e: Electron.IpcRendererEvent, data: { docId: string; content: string }) => cb(data)
+  onSyncExternalEdit: (cb: (data: { docId: string; content: string; baseContent?: string }) => void) => {
+    const handler = (_e: Electron.IpcRendererEvent, data: { docId: string; content: string; baseContent?: string }) => cb(data)
     ipcRenderer.on('sync:externalEdit', handler)
     return () => ipcRenderer.removeListener('sync:externalEdit', handler)
   },
   syncContentChanged: (docId: string, content: string) =>
     ipcRenderer.invoke('sync:contentChanged', docId, content),
+
+  // MCP compile events (Claude Code triggers compile via file signal)
+  onMcpCompileStarted: (cb: () => void) => {
+    const handler = () => cb()
+    ipcRenderer.on('compile:mcpStarted', handler)
+    return () => ipcRenderer.removeListener('compile:mcpStarted', handler)
+  },
+  onMcpCompileFinished: (cb: (data: { success: boolean; pdfPath: string }) => void) => {
+    const handler = (_e: Electron.IpcRendererEvent, data: { success: boolean; pdfPath: string }) => cb(data)
+    ipcRenderer.on('compile:mcpFinished', handler)
+    return () => ipcRenderer.removeListener('compile:mcpFinished', handler)
+  },
   onSyncNewDoc: (cb: (data: { docId: string | null; relPath: string }) => void) => {
     const handler = (_e: Electron.IpcRendererEvent, data: { docId: string | null; relPath: string }) => cb(data)
     ipcRenderer.on('sync:newDoc', handler)

@@ -125,16 +125,33 @@ export class OverleafDocSync {
     }
   }
 
-  /** Replace entire editor content with new content (external edit from disk) */
-  replaceContent(newContent: string) {
+  /** Replace entire editor content with new content (external edit from disk).
+   *  If baseContent is provided, does a three-way merge to preserve concurrent
+   *  remote changes that arrived while the disk edit was being debounced. */
+  replaceContent(newContent: string, baseContent?: string) {
     if (!this.view) return
 
     const currentContent = this.view.state.doc.toString()
     if (currentContent === newContent) return
 
-    // Use diff to compute minimal changes so comment range positions remap correctly
     const dmp = new diff_match_patch()
-    const diffs = dmp.diff_main(currentContent, newContent)
+    let targetContent = newContent
+
+    // Three-way merge: if editor has diverged from the base (due to remote edits),
+    // apply only the disk changes (base→new) as patches on top of current editor state
+    if (baseContent !== undefined && currentContent !== baseContent) {
+      const patches = dmp.patch_make(baseContent, newContent)
+      const [merged, results] = dmp.patch_apply(patches, currentContent)
+      if (results.length > 0 && results.every(r => r)) {
+        targetContent = merged
+      }
+      // If patch failed, fall through to two-way diff (full replacement)
+    }
+
+    if (currentContent === targetContent) return
+
+    // Use diff to compute minimal changes so comment range positions remap correctly
+    const diffs = dmp.diff_main(currentContent, targetContent)
     dmp.diff_cleanupEfficiency(diffs)
 
     const changes: ChangeSpec[] = []
@@ -156,7 +173,15 @@ export class OverleafDocSync {
   }
 
   destroy() {
-    if (this.debounceTimer) clearTimeout(this.debounceTimer)
+    // Flush any debounced local changes before destroying, so OT ops are sent
+    // to the server before the bridge takes back ownership of this doc.
+    if (this.debounceTimer) {
+      clearTimeout(this.debounceTimer)
+      this.debounceTimer = null
+    }
+    if (this.pendingChanges && this.view && this.pendingBaseDoc) {
+      this.flushLocalChanges()
+    }
     this.view = null
     this.pendingChanges = null
     this.pendingBaseDoc = null

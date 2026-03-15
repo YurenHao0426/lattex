@@ -745,6 +745,9 @@ ipcMain.handle('ot:connect', async (_e, projectId: string) => {
     fileSyncBridge = new FileSyncBridge(overleafSock, tmpDir, docPathMap, pathDocMap, fileRefs, mainWindow!, projectId, overleafSessionCookie, overleafCsrfToken)
     await fileSyncBridge.start()
 
+    // Start MCP compile watcher (detects compile requests from Claude Code)
+    startMcpCompileWatcher(tmpDir)
+
     // Write MCP state + config for Claude Code integration
     mcpStateDir = tmpDir
     mcpProjectId = projectId
@@ -926,7 +929,8 @@ You have MCP tools to interact with Overleaf. Use them proactively.
 })
 
 ipcMain.handle('ot:disconnect', async () => {
-  // Clean up MCP state file
+  // Clean up MCP state file + compile watcher
+  stopMcpCompileWatcher()
   if (mcpStateDir) {
     unlink(join(mcpStateDir, '.lattex-mcp.json')).catch(() => {})
   }
@@ -1347,8 +1351,26 @@ ipcMain.handle('overleaf:socketCompile', async (_e, mainTexRelPath: string) => {
   })
 })
 
-// Server-side compile via Overleaf's CLSI
-ipcMain.handle('overleaf:serverCompile', async (_e, rootDocId?: string) => {
+// Server-side compile via Overleaf's CLSI (shared by IPC handler + MCP compile watcher)
+let compileInProgress: Promise<{ success: boolean; log: string; pdfPath: string }> | null = null
+
+async function doServerCompile(rootDocId?: string): Promise<{ success: boolean; log: string; pdfPath: string }> {
+  // Prevent concurrent compiles — wait for existing one if already in progress
+  if (compileInProgress) {
+    console.log('[compile] compile already in progress, waiting...')
+    return compileInProgress
+  }
+
+  const promise = doServerCompileImpl(rootDocId)
+  compileInProgress = promise
+  try {
+    return await promise
+  } finally {
+    compileInProgress = null
+  }
+}
+
+async function doServerCompileImpl(rootDocId?: string): Promise<{ success: boolean; log: string; pdfPath: string }> {
   if (!overleafSessionCookie || !overleafSock?.projectData) {
     return { success: false, log: 'Not connected', pdfPath: '' }
   }
@@ -1365,6 +1387,13 @@ ipcMain.handle('overleaf:serverCompile', async (_e, rootDocId?: string) => {
 
   try {
     sendToRenderer('latex:log', 'Compiling on Overleaf server...\n')
+
+    // Flush in-memory OT changes to database so CLSI sees latest content
+    try {
+      await overleafFetch(`/project/${projectId}/flush`, { method: 'POST' })
+    } catch (e) {
+      console.log('[compile] flush failed (non-fatal):', e)
+    }
 
     const compileBody = JSON.stringify({
       rootDoc_id: effectiveRootDocId,
@@ -1415,7 +1444,10 @@ ipcMain.handle('overleaf:serverCompile', async (_e, rootDocId?: string) => {
     if (logFile) {
       try {
         const logContent = await fetchBinary(buildOutputUrl(logFile), overleafSessionCookie)
-        sendToRenderer('latex:log', Buffer.from(logContent).toString('utf-8'))
+        const logText = Buffer.from(logContent).toString('utf-8')
+        sendToRenderer('latex:log', logText)
+        // Write log for MCP server to read (avoids redundant compile API call)
+        writeFile(join(syncDir, '.lattex-compile-log'), logText).catch(() => {})
       } catch (e) {
         sendToRenderer('latex:log', `[log fetch failed: ${e}]\n`)
       }
@@ -1485,7 +1517,82 @@ ipcMain.handle('overleaf:serverCompile', async (_e, rootDocId?: string) => {
     sendToRenderer('latex:log', msg + '\n')
     return { success: false, log: msg, pdfPath: '' }
   }
+}
+
+ipcMain.handle('overleaf:serverCompile', async (_e, rootDocId?: string) => {
+  return doServerCompile(rootDocId)
 })
+
+// Watch for MCP compile requests (file-based signal from MCP server process)
+let mcpCompileWatcher: ReturnType<typeof import('fs').watchFile> | null = null
+let mcpCompileActive = false
+
+function startMcpCompileWatcher(syncDir: string) {
+  const requestPath = join(syncDir, '.lattex-compile-request')
+  const resultPath = join(syncDir, '.lattex-compile-result')
+
+  // Poll for the request file every 300ms
+  const { watchFile, unwatchFile } = require('fs')
+  watchFile(requestPath, { interval: 300 }, async (curr: { size: number }) => {
+    if (curr.size === 0 || mcpCompileActive) return
+    mcpCompileActive = true
+
+    try {
+      const reqData = JSON.parse(await readFile(requestPath, 'utf-8'))
+      await unlink(requestPath).catch(() => {})
+
+      console.log('[mcp-compile] compile request received:', reqData.requestId)
+
+      // Notify renderer: compile started
+      sendToRenderer('compile:mcpStarted', null)
+
+      // Resolve main_file to rootDocId if provided
+      let rootDocId: string | undefined
+      if (reqData.mainFile && mcpPathDocMap[reqData.mainFile]) {
+        rootDocId = mcpPathDocMap[reqData.mainFile]
+      }
+
+      const result = await doServerCompile(rootDocId)
+
+      // Notify renderer: compile finished (renderer will update PDF + compiling state)
+      sendToRenderer('compile:mcpFinished', {
+        success: result.success,
+        pdfPath: result.pdfPath
+      })
+
+      // Write result for MCP server to read
+      await writeFile(resultPath, JSON.stringify({
+        requestId: reqData.requestId,
+        success: result.success,
+        pdfPath: result.pdfPath,
+        status: result.success ? 'success' : 'failure'
+      }))
+      console.log('[mcp-compile] compile result written:', result.success)
+    } catch (e) {
+      console.log('[mcp-compile] error handling compile request:', e)
+      // Write error result so MCP doesn't hang
+      await writeFile(resultPath, JSON.stringify({
+        success: false,
+        status: 'error',
+        error: String(e)
+      })).catch(() => {})
+      sendToRenderer('compile:mcpFinished', { success: false, pdfPath: '' })
+    } finally {
+      mcpCompileActive = false
+    }
+  })
+
+  mcpCompileWatcher = { requestPath } as any
+  console.log('[mcp-compile] watcher started for', requestPath)
+}
+
+function stopMcpCompileWatcher() {
+  if (mcpCompileWatcher) {
+    const { unwatchFile } = require('fs')
+    unwatchFile((mcpCompileWatcher as any).requestPath)
+    mcpCompileWatcher = null
+  }
+}
 
 /** Fetch a binary resource. Cookie is optional — CDN URLs use build ID for auth. */
 function fetchBinary(url: string, cookie?: string): Promise<ArrayBuffer> {
@@ -1539,6 +1646,7 @@ app.whenReady().then(async () => {
 
 app.on('window-all-closed', () => {
   mainWindow = null
+  stopMcpCompileWatcher()
   for (const inst of ptyInstances.values()) inst.kill()
   ptyInstances.clear()
   fileSyncBridge?.stop()

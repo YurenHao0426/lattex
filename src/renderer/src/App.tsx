@@ -103,7 +103,7 @@ export default function App() {
     // Listen for external edits from file sync bridge (disk changes)
     const unsubExternalEdit = window.api.onSyncExternalEdit((data) => {
       const sync = activeDocSyncs.get(data.docId)
-      if (sync) sync.replaceContent(data.content)
+      if (sync) sync.replaceContent(data.content, data.baseContent)
     })
 
     // Listen for new docs created locally (e.g. by Claude Code)
@@ -194,6 +194,25 @@ export default function App() {
     })
     return unsub
   }, [])
+
+  // MCP compile events (Claude Code triggered compile)
+  useEffect(() => {
+    const unsubStart = window.api.onMcpCompileStarted(() => {
+      const state = useAppStore.getState()
+      state.setCompiling(true)
+      state.clearCompileLog()
+      setStatusMessage('Compiling (triggered by Claude Code)...')
+    })
+    const unsubFinish = window.api.onMcpCompileFinished((data) => {
+      const state = useAppStore.getState()
+      if (data.pdfPath) {
+        state.setPdfPath(data.pdfPath)
+      }
+      state.setCompiling(false)
+      setStatusMessage(data.success ? 'Compiled successfully' : 'Compilation had errors — check Log tab')
+    })
+    return () => { unsubStart(); unsubFinish() }
+  }, [setStatusMessage])
 
   // Keyboard shortcuts
   useEffect(() => {
@@ -340,6 +359,11 @@ export default function App() {
               useAppStore.getState().setDocVersion(docId, res.version)
             }
           }
+          // Release back to bridge — we only needed the content for autocomplete,
+          // not an active editor session. Without this, the bridge permanently thinks
+          // the renderer handles OT for .bib files and defers disk changes to a
+          // non-existent docSync.
+          window.api.otLeaveDoc(docId)
         }).catch(() => {})
       }
     }

@@ -59,6 +59,7 @@ export class FileSyncBridge {
   private csrfToken: string
 
   private serverEventHandler: ((name: string, args: unknown[]) => void) | null = null
+  private docRejoinedHandler: ((docId: string, result: { docLines: string[]; version: number }) => void) | null = null
   private stopped = false
 
   constructor(
@@ -115,6 +116,8 @@ export class FileSyncBridge {
     this.serverEventHandler = (name: string, args: unknown[]) => {
       if (name === 'otUpdateApplied') {
         this.handleOtUpdate(args)
+      } else if (name === 'otUpdateError') {
+        this.handleOtError(args)
       } else if (name === 'reciveNewFile') {
         this.handleNewFile(args)
       } else if (name === 'reciveNewDoc') {
@@ -126,6 +129,27 @@ export class FileSyncBridge {
       }
     }
     this.socket.on('serverEvent', this.serverEventHandler)
+
+    // Listen for doc rejoin events (after reconnect) — reset bridge OtClient for non-editor docs
+    this.docRejoinedHandler = (docId: string, result: { docLines: string[]; version: number }) => {
+      if (this.editorDocs.has(docId)) return // renderer handles editor docs
+      const relPath = this.docPathMap[docId]
+      if (!relPath) return
+
+      const content = (result.docLines || []).join('\n')
+      bridgeLog(`[FileSyncBridge] docRejoined: resetting ${relPath} to v${result.version}`)
+      this.lastKnownContent.set(relPath, content)
+
+      const otClient = new OtClient(
+        result.version,
+        (ops, version) => this.sendOps(docId, ops, version),
+        (ops) => this.onRemoteApply(docId, ops)
+      )
+      this.otClients.set(docId, otClient)
+
+      this.writeToDisk(relPath, content)
+    }
+    this.socket.on('docRejoined', this.docRejoinedHandler)
 
     // Start watching the temp dir
     // usePolling: FSEvents is unreliable in macOS temp dirs (/var/folders/...)
@@ -184,10 +208,14 @@ export class FileSyncBridge {
     }
     this.debounceTimers.clear()
 
-    // Remove server event handler
+    // Remove event handlers
     if (this.serverEventHandler) {
       this.socket.removeListener('serverEvent', this.serverEventHandler)
       this.serverEventHandler = null
+    }
+    if (this.docRejoinedHandler) {
+      this.socket.removeListener('docRejoined', this.docRejoinedHandler)
+      this.docRejoinedHandler = null
     }
 
     // Close watcher
@@ -260,6 +288,58 @@ export class FileSyncBridge {
         otClient.onAck()
       }
     }
+  }
+
+  // ── OT error handler ────────────────────────────────────────
+
+  /** Server rejected our OT update — recover by re-joining the doc */
+  private handleOtError(args: unknown[]): void {
+    const error = args[0] as { doc?: string; message?: string } | undefined
+    if (!error?.doc) return
+    const docId = error.doc
+    if (this.editorDocs.has(docId)) return // renderer handles editor docs
+
+    const relPath = this.docPathMap[docId]
+    if (!relPath) return
+
+    bridgeLog(`[FileSyncBridge] otUpdateError for ${relPath}: ${error.message || 'unknown'}`)
+
+    // Re-join the doc to get fresh version and content, then re-apply disk content if different
+    this.socket.joinDoc(docId).then(async (result) => {
+      const serverContent = (result.docLines || []).join('\n')
+
+      // Reset OtClient with fresh version
+      const otClient = new OtClient(
+        result.version,
+        (ops, version) => this.sendOps(docId, ops, version),
+        (ops) => this.onRemoteApply(docId, ops)
+      )
+      this.otClients.set(docId, otClient)
+
+      // Check if disk has changes that need to be re-sent
+      let diskContent: string | undefined
+      try {
+        diskContent = await readFile(join(this.tmpDir, relPath), 'utf-8')
+      } catch { /* file may not exist */ }
+
+      if (diskContent && diskContent !== serverContent) {
+        // Re-apply disk changes with fresh OT state
+        bridgeLog(`[FileSyncBridge] re-applying disk changes for ${relPath} after OT error`)
+        this.lastKnownContent.set(relPath, serverContent)
+        const diffs = dmp.diff_main(serverContent, diskContent)
+        dmp.diff_cleanupEfficiency(diffs)
+        const ops = diffsToOtOps(diffs)
+        if (ops.length > 0) {
+          this.lastKnownContent.set(relPath, diskContent)
+          otClient.onLocalOps(ops)
+        }
+      } else {
+        this.lastKnownContent.set(relPath, serverContent)
+        this.writeToDisk(relPath, serverContent)
+      }
+    }).catch((e) => {
+      bridgeLog(`[FileSyncBridge] failed to recover from OT error for ${relPath}:`, e)
+    })
   }
 
   // ── Binary file event handlers (socket) ────────────────────
@@ -508,12 +588,15 @@ export class FileSyncBridge {
     bridgeLog(`[FileSyncBridge] disk change detected: ${relPath} (${newContent.length} chars, was ${lastKnown?.length ?? 'undefined'})`)
 
     if (this.editorDocs.has(docId)) {
-      // Doc is open in editor → send to renderer via IPC
-      // Don't update lastKnownContent here — let the renderer confirm via syncContentChanged.
-      // This prevents race conditions where remote OT ops overwrite lastKnownContent
-      // before the disk change is fully processed through the editor's OT pipeline.
+      // Doc is open in editor → send to renderer via IPC.
+      // Include baseContent so renderer can do a three-way merge: if remote edits
+      // arrived during the debounce window, they'll be preserved alongside the disk edit.
+      // Always update lastKnownContent to match disk — even if the renderer can't process
+      // the edit (e.g. doc is an editor doc but not the active tab), we must not let
+      // lastKnownContent go stale or we'll re-detect the same "change" indefinitely.
+      this.lastKnownContent.set(relPath, newContent)
       bridgeLog(`[FileSyncBridge] → sending sync:externalEdit to renderer for ${relPath}`)
-      this.mainWindow.webContents.send('sync:externalEdit', { docId, content: newContent })
+      this.mainWindow.webContents.send('sync:externalEdit', { docId, content: newContent, baseContent: lastKnown ?? '' })
     } else {
       // Doc NOT open in editor → bridge handles OT directly
       const oldContent = lastKnown ?? ''
@@ -754,9 +837,8 @@ export class FileSyncBridge {
     const relPath = this.docPathMap[docId]
     if (!relPath) return
 
-    this.socket.joinDoc(docId).then((result) => {
-      const content = (result.docLines || []).join('\n')
-      this.lastKnownContent.set(relPath, content)
+    this.socket.joinDoc(docId).then(async (result) => {
+      const serverContent = (result.docLines || []).join('\n')
 
       const otClient = new OtClient(
         result.version,
@@ -765,7 +847,29 @@ export class FileSyncBridge {
       )
       this.otClients.set(docId, otClient)
 
-      this.writeToDisk(relPath, content)
+      // Read disk content — it may be newer than server if the renderer just
+      // flushed OT ops that haven't been acknowledged yet (race condition).
+      let diskContent: string | undefined
+      try {
+        diskContent = await readFile(join(this.tmpDir, relPath), 'utf-8')
+      } catch { /* file may not exist */ }
+
+      if (diskContent !== undefined && diskContent !== serverContent) {
+        // Disk has changes server doesn't know about — re-send as OT ops
+        bridgeLog(`[FileSyncBridge] removeEditorDoc: disk differs from server for ${relPath}, re-sending`)
+        this.lastKnownContent.set(relPath, diskContent)
+        const diffs = dmp.diff_main(serverContent, diskContent)
+        dmp.diff_cleanupEfficiency(diffs)
+        const ops = diffsToOtOps(diffs)
+        if (ops.length > 0) {
+          otClient.onLocalOps(ops)
+        }
+      } else {
+        this.lastKnownContent.set(relPath, serverContent)
+        if (diskContent !== serverContent) {
+          this.writeToDisk(relPath, serverContent)
+        }
+      }
     }).catch((e) => {
       bridgeLog(`[FileSyncBridge] failed to re-join doc ${relPath}:`, e)
     })
