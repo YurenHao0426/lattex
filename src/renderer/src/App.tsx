@@ -122,6 +122,30 @@ export default function App() {
       useAppStore.getState().setCommentContexts(data.contexts)
     })
 
+    // Listen for comment events to update resolvedThreadIds immediately
+    // (ReviewPanel may not be mounted, so highlights wouldn't update otherwise)
+    const unsubCommentsEvent = window.api.onCommentsEvent?.((event) => {
+      const { type, args } = event
+      const store = useAppStore.getState()
+      if (type === 'resolve-thread') {
+        const threadId = args[0] as string
+        store.setResolvedThreadIds(new Set([...(store.resolvedThreadIds || []), threadId]))
+      } else if (type === 'reopen-thread') {
+        const threadId = args[0] as string
+        const ids = new Set(store.resolvedThreadIds || [])
+        ids.delete(threadId)
+        store.setResolvedThreadIds(ids)
+      } else if (type === 'delete-thread') {
+        const threadId = args[0] as string
+        const newCtx = { ...store.commentContexts }
+        delete newCtx[threadId]
+        store.setCommentContexts(newCtx)
+        const ids = new Set(store.resolvedThreadIds || [])
+        ids.delete(threadId)
+        store.setResolvedThreadIds(ids)
+      }
+    })
+
     // Listen for remote cursor updates
     const unsubCursorUpdate = window.api.onCursorRemoteUpdate((raw) => {
       const data = raw as {
@@ -181,6 +205,7 @@ export default function App() {
       unsubNewDoc()
       unsubInitThreads?.()
       unsubInitContexts?.()
+      unsubCommentsEvent?.()
       unsubCursorUpdate()
       unsubCursorDisconnected()
       remoteCursors.clear()
