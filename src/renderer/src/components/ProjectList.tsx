@@ -32,6 +32,9 @@ export default function ProjectList({ onOpenProject }: Props) {
   const [sortOrder, setSortOrder] = useState<SortOrder>('desc')
   const [showNewProject, setShowNewProject] = useState(false)
   const [newProjectName, setNewProjectName] = useState('Untitled Project')
+  const [showApiKeys, setShowApiKeys] = useState(false)
+  const [apiKeys, setApiKeys] = useState<Record<string, string>>({})
+  const [apiKeysVisible, setApiKeysVisible] = useState<Record<string, boolean>>({})
   const { setStatusMessage } = useAppStore()
 
   const loadProjects = useCallback(async () => {
@@ -123,6 +126,32 @@ export default function ProjectList({ onOpenProject }: Props) {
     useAppStore.getState().setScreen('login')
   }
 
+  const openApiKeys = async () => {
+    const keys = await window.api.getApiKeys()
+    setApiKeys(keys)
+    setApiKeysVisible({})
+    setShowApiKeys(true)
+  }
+
+  const saveApiKeys = async () => {
+    // Strip empty keys before saving
+    const cleaned: Record<string, string> = {}
+    for (const [k, v] of Object.entries(apiKeys)) {
+      if (v.trim()) cleaned[k] = v.trim()
+    }
+    await window.api.setApiKeys(cleaned)
+    setShowApiKeys(false)
+    setStatusMessage('API keys saved')
+  }
+
+  const API_KEY_FIELDS = [
+    { id: 'openai', label: 'OpenAI', placeholder: 'sk-...' },
+    { id: 'anthropic', label: 'Anthropic (Claude)', placeholder: 'sk-ant-...' },
+    { id: 'openrouter', label: 'OpenRouter', placeholder: 'sk-or-...' },
+    { id: 'gemini', label: 'Google Gemini', placeholder: 'AIza...' },
+    { id: 'semanticScholar', label: 'Semantic Scholar', placeholder: 'API key (optional, avoids rate limits)' }
+  ]
+
   const toggleSort = (key: SortKey) => {
     if (sortBy === key) {
       setSortOrder((o) => (o === 'asc' ? 'desc' : 'asc'))
@@ -206,6 +235,9 @@ export default function ProjectList({ onOpenProject }: Props) {
         <div className="projects-header">
           <h1>Latte<span className="lattex-x">X</span></h1>
           <div className="projects-header-actions">
+            <button className="btn btn-secondary btn-sm" onClick={openApiKeys}>
+              API Keys
+            </button>
             <button className="btn btn-secondary btn-sm" onClick={handleLogout}>
               Sign out
             </button>
@@ -308,6 +340,46 @@ export default function ProjectList({ onOpenProject }: Props) {
             <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
               <button className="btn btn-secondary btn-sm" onClick={() => setShowNewProject(false)}>Cancel</button>
               <button className="btn btn-primary btn-sm" onClick={handleCreateProject}>Create</button>
+            </div>
+          </div>
+        </div>
+      )}
+      {showApiKeys && (
+        <div className="modal-overlay" onClick={() => setShowApiKeys(false)}>
+          <div className="modal-box" onClick={(e) => e.stopPropagation()} style={{ minWidth: 460 }}>
+            <h3 style={{ margin: '0 0 4px' }}>API Keys</h3>
+            <p style={{ margin: '0 0 16px', fontSize: 12, color: 'var(--text-secondary)' }}>
+              Keys are stored locally on this device.
+            </p>
+            {API_KEY_FIELDS.map((field) => (
+              <div key={field.id} style={{ marginBottom: 12 }}>
+                <label style={{ display: 'block', fontSize: 12, fontWeight: 500, marginBottom: 4, color: 'var(--text-secondary)' }}>
+                  {field.label}
+                </label>
+                <div style={{ display: 'flex', gap: 4 }}>
+                  <input
+                    type={apiKeysVisible[field.id] ? 'text' : 'password'}
+                    className="modal-input"
+                    value={apiKeys[field.id] || ''}
+                    onChange={(e) => setApiKeys({ ...apiKeys, [field.id]: e.target.value })}
+                    placeholder={field.placeholder}
+                    spellCheck={false}
+                    autoComplete="off"
+                  />
+                  <button
+                    className="btn btn-secondary btn-sm"
+                    onClick={() => setApiKeysVisible({ ...apiKeysVisible, [field.id]: !apiKeysVisible[field.id] })}
+                    style={{ flexShrink: 0, padding: '6px 8px', fontSize: 11 }}
+                    title={apiKeysVisible[field.id] ? 'Hide' : 'Show'}
+                  >
+                    {apiKeysVisible[field.id] ? 'Hide' : 'Show'}
+                  </button>
+                </div>
+              </div>
+            ))}
+            <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 16 }}>
+              <button className="btn btn-secondary btn-sm" onClick={() => setShowApiKeys(false)}>Cancel</button>
+              <button className="btn btn-primary btn-sm" onClick={saveApiKeys}>Save</button>
             </div>
           </div>
         </div>

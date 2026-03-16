@@ -528,6 +528,13 @@ const TOOLS = [
 
 // ── Semantic Scholar helpers ─────────────────────────────────
 
+function getSemanticScholarApiKey() {
+  try {
+    const state = readState()
+    return state.semanticScholarApiKey || null
+  } catch { return null }
+}
+
 function semanticScholarSearch(query, limit) {
   return new Promise((resolve) => {
     const params = new URLSearchParams({
@@ -535,13 +542,14 @@ function semanticScholarSearch(query, limit) {
       limit: String(limit),
       fields: 'title,authors,year,externalIds,venue,publicationDate,abstract,citationCount'
     })
+    const headers = { 'User-Agent': 'LatteX-MCP/1.0' }
+    const apiKey = getSemanticScholarApiKey()
+    if (apiKey) headers['x-api-key'] = apiKey
     const options = {
       hostname: 'api.semanticscholar.org',
       path: `/graph/v1/paper/search?${params}`,
       method: 'GET',
-      headers: {
-        'User-Agent': 'LatteX-MCP/1.0'
-      }
+      headers
     }
 
     const req = https.request(options, (res) => {

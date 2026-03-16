@@ -29,13 +29,20 @@ let mcpOnlineUsersWriteTimer: ReturnType<typeof setTimeout> | null = null
 async function writeMcpState(): Promise<void> {
   if (!mcpStateDir || !mcpProjectId) return
   try {
-    const state = {
+    // Read S2 API key if available
+    let s2Key: string | undefined
+    try {
+      const keys = JSON.parse(await readFile(apiKeysPath, 'utf-8'))
+      if (keys.semanticScholar) s2Key = keys.semanticScholar
+    } catch { /* ignore */ }
+    const state: Record<string, unknown> = {
       projectId: mcpProjectId,
       cookie: overleafSessionCookie,
       csrf: overleafCsrfToken,
       commentContexts: mcpCommentContexts,
       pathDocMap: mcpPathDocMap
     }
+    if (s2Key) state.semanticScholarApiKey = s2Key
     await writeFile(join(mcpStateDir, '.lattex-mcp.json'), JSON.stringify(state, null, 2))
   } catch { /* ignore */ }
 }
@@ -89,6 +96,22 @@ ipcMain.handle('fs:readFile', async (_e, filePath: string) => {
 ipcMain.handle('fs:readBinary', async (_e, filePath: string) => {
   const buffer = await readFile(filePath)
   return buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength)
+})
+
+// ── API Key Storage ─────────────────────────────────────────────
+
+const apiKeysPath = join(app.getPath('userData'), 'api-keys.json')
+
+ipcMain.handle('settings:getApiKeys', async () => {
+  try {
+    return JSON.parse(await readFile(apiKeysPath, 'utf-8'))
+  } catch {
+    return {}
+  }
+})
+
+ipcMain.handle('settings:setApiKeys', async (_e, keys: Record<string, string>) => {
+  await writeFile(apiKeysPath, JSON.stringify(keys, null, 2))
 })
 
 // ── LaTeX Compilation ────────────────────────────────────────────

@@ -229,6 +229,10 @@ const api = {
     return () => ipcRenderer.removeListener('comments:initContexts', handler)
   },
 
+  // API Keys
+  getApiKeys: () => ipcRenderer.invoke('settings:getApiKeys') as Promise<Record<string, string>>,
+  setApiKeys: (keys: Record<string, string>) => ipcRenderer.invoke('settings:setApiKeys', keys),
+
   // Shell
   openExternal: (url: string) => ipcRenderer.invoke('shell:openExternal', url),
   showInFinder: (path: string) => ipcRenderer.invoke('shell:showInFinder', path),
