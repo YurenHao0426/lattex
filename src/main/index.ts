@@ -864,6 +864,12 @@ You have MCP tools to interact with Overleaf. Use them proactively.
 - **get_compile_warnings**: Get parsed warnings from last compile.
 - **get_compile_log**: Get full raw log. Pass \`tail: N\` for last N lines only.
 
+### PDF
+- **read_compiled_pdf**: Get the path to the compiled PDF. After calling this, use your **Read** tool on the returned path to visually inspect the PDF. Use the \`pages\` parameter (e.g. \`"1-3"\`) to read specific pages. This lets you verify formatting, figures, tables, and layout.
+
+### Bibliography
+- **search_citation**: Search academic papers by title, topic, or author. Returns matching papers with ready-to-use BibTeX entries that can be pasted directly into a \`.bib\` file.
+
 ### Workflows
 
 #### Comment Workflow
@@ -878,6 +884,13 @@ You have MCP tools to interact with Overleaf. Use them proactively.
 2. Use \`compile_latex\` to compile
 3. If errors: use \`get_compile_errors\` for details, fix them, recompile
 4. If warnings: use \`get_compile_warnings\` to review
+5. To check visual output: use \`read_compiled_pdf\`, then Read the returned path with \`pages: "1-3"\`
+
+#### Bibliography Workflow
+1. Use \`search_citation\` with a topic or paper title to find references
+2. Copy the BibTeX entry into the \`.bib\` file
+3. Use \`\\cite{key}\` in the \`.tex\` file
+4. Compile to verify the citation renders correctly
 
 ## Workspace
 
@@ -903,7 +916,9 @@ The \`claude-workspace/\` directory is your private scratch space. It is **not s
             'mcp__lattex__compile_latex',
             'mcp__lattex__get_compile_errors',
             'mcp__lattex__get_compile_warnings',
-            'mcp__lattex__get_compile_log'
+            'mcp__lattex__get_compile_log',
+            'mcp__lattex__read_compiled_pdf',
+            'mcp__lattex__search_citation'
           ]
         }
       }, null, 2))

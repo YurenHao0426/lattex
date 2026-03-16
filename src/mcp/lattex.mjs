@@ -495,8 +495,144 @@ const TOOLS = [
       type: 'object',
       properties: {}
     }
+  },
+  // ── PDF ──
+  {
+    name: 'read_compiled_pdf',
+    description: 'Get the path to the compiled PDF file. After calling this, use the Read tool on the returned path (with a pages parameter like "1-5" for large PDFs) to visually inspect the compiled output. This lets you verify formatting, figures, tables, and layout.',
+    inputSchema: {
+      type: 'object',
+      properties: {}
+    }
+  },
+  // ── Bibliography ──
+  {
+    name: 'search_citation',
+    description: 'Search for academic papers and get BibTeX entries. Uses Semantic Scholar API. Returns matching papers with ready-to-use BibTeX that can be pasted directly into a .bib file.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        query: {
+          type: 'string',
+          description: 'Search query — paper title, topic, author name, or keywords (e.g. "attention is all you need", "transformer language model")'
+        },
+        limit: {
+          type: 'number',
+          description: 'Max number of results. Default: 5, max: 10.'
+        }
+      },
+      required: ['query']
+    }
   }
 ]
+
+// ── Semantic Scholar helpers ─────────────────────────────────
+
+function semanticScholarSearch(query, limit) {
+  return new Promise((resolve) => {
+    const params = new URLSearchParams({
+      query,
+      limit: String(limit),
+      fields: 'title,authors,year,externalIds,venue,publicationDate,abstract,citationCount'
+    })
+    const options = {
+      hostname: 'api.semanticscholar.org',
+      path: `/graph/v1/paper/search?${params}`,
+      method: 'GET',
+      headers: {
+        'User-Agent': 'LatteX-MCP/1.0'
+      }
+    }
+
+    const req = https.request(options, (res) => {
+      let data = ''
+      res.on('data', (chunk) => (data += chunk))
+      res.on('end', () => {
+        try {
+          const parsed = JSON.parse(data)
+          if (res.statusCode >= 200 && res.statusCode < 300) {
+            resolve({ ok: true, papers: parsed.data || [] })
+          } else {
+            resolve({ ok: false, error: `HTTP ${res.statusCode}: ${parsed.message || data}` })
+          }
+        } catch {
+          resolve({ ok: false, error: `Failed to parse response: ${data.slice(0, 200)}` })
+        }
+      })
+    })
+    req.on('error', (e) => resolve({ ok: false, error: e.message }))
+    req.end()
+  })
+}
+
+/** Generate a BibTeX key from author surname + year + first title word */
+function makeBibtexKey(paper) {
+  let authorPart = 'unknown'
+  if (paper.authors?.length > 0) {
+    const name = paper.authors[0].name || ''
+    const parts = name.split(' ')
+    authorPart = (parts[parts.length - 1] || 'unknown').toLowerCase().replace(/[^a-z]/g, '')
+  }
+  const year = paper.year || ''
+  const titleWord = (paper.title || '')
+    .split(/\s+/)
+    .find(w => w.length > 3 && !/^(the|and|for|with|from|this|that|into)$/i.test(w)) || 'paper'
+  return `${authorPart}${year}${titleWord.toLowerCase().replace(/[^a-z0-9]/g, '')}`
+}
+
+function escapeLatex(str) {
+  if (!str) return ''
+  return str
+    .replace(/&/g, '\\&')
+    .replace(/%/g, '\\%')
+    .replace(/#/g, '\\#')
+    .replace(/\$/g, '\\$')
+    .replace(/_/g, '\\_')
+    .replace(/\{/g, '\\{')
+    .replace(/\}/g, '\\}')
+    .replace(/~/g, '\\textasciitilde{}')
+    .replace(/\^/g, '\\textasciicircum{}')
+}
+
+function paperToBibtex(paper) {
+  const key = makeBibtexKey(paper)
+  const doi = paper.externalIds?.DOI
+  const arxiv = paper.externalIds?.ArXiv
+
+  // Determine entry type
+  let entryType = 'article'
+  const venue = (paper.venue || '').toLowerCase()
+  if (/proceedings|conference|workshop|symposium|icml|neurips|iclr|cvpr|aaai|acl|emnlp|naacl|sigir|www|kdd/i.test(venue)) {
+    entryType = 'inproceedings'
+  } else if (arxiv && !doi) {
+    entryType = 'misc'
+  }
+
+  const authors = (paper.authors || []).map(a => a.name).join(' and ')
+
+  const fields = []
+  fields.push(`  title = {${paper.title || ''}}`)
+  fields.push(`  author = {${authors}}`)
+  if (paper.year) fields.push(`  year = {${paper.year}}`)
+
+  if (entryType === 'inproceedings') {
+    fields.push(`  booktitle = {${paper.venue || ''}}`)
+  } else if (entryType === 'article' && paper.venue) {
+    fields.push(`  journal = {${paper.venue}}`)
+  }
+
+  if (doi) fields.push(`  doi = {${doi}}`)
+  if (arxiv) {
+    if (entryType === 'misc') {
+      fields.push(`  eprint = {${arxiv}}`)
+      fields.push(`  archivePrefix = {arXiv}`)
+    } else {
+      fields.push(`  note = {arXiv:${arxiv}}`)
+    }
+  }
+
+  return `@${entryType}{${key},\n${fields.join(',\n')}\n}`
+}
 
 // ── Server ─────────────────────────────────────────────────────
 
@@ -883,6 +1019,50 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         } catch {
           return textResult('No other users currently online.')
         }
+      }
+
+      // ── PDF ──────────────────────────────────────────
+
+      case 'read_compiled_pdf': {
+        const cwd = process.cwd()
+        const pdfPath = join(cwd, '.build', 'output.pdf')
+        try {
+          statSync(pdfPath)
+        } catch {
+          return errorResult(
+            'No compiled PDF found. Run compile_latex first, then call this tool again.'
+          )
+        }
+        return textResult(
+          `Compiled PDF is at:\n\n${pdfPath}\n\nUse the Read tool on this path to visually inspect the PDF. For large documents, use the pages parameter (e.g. pages: "1-3") to read specific pages.`
+        )
+      }
+
+      // ── Bibliography ─────────────────────────────────
+
+      case 'search_citation': {
+        const query = args.query
+        const limit = Math.min(args?.limit || 5, 10)
+
+        const searchResult = await semanticScholarSearch(query, limit)
+        if (!searchResult.ok) {
+          return errorResult(`Semantic Scholar search failed: ${searchResult.error}`)
+        }
+
+        const papers = searchResult.papers
+        if (papers.length === 0) {
+          return textResult(`No papers found for query: "${query}"`)
+        }
+
+        const entries = papers.map((p, i) => {
+          const bibtex = paperToBibtex(p)
+          const cited = p.citationCount != null ? ` (cited ${p.citationCount}×)` : ''
+          return `### ${i + 1}. ${p.title}${cited}\n${p.authors?.map(a => a.name).join(', ') || 'Unknown authors'} — ${p.venue || 'Unknown venue'}, ${p.year || '?'}\n${p.abstract ? `\n${p.abstract.length > 300 ? p.abstract.slice(0, 300) + '...' : p.abstract}\n` : ''}\n\`\`\`bibtex\n${bibtex}\n\`\`\``
+        })
+
+        return textResult(
+          `Found ${papers.length} paper(s) for "${query}":\n\n${entries.join('\n\n')}\n\nCopy the BibTeX entries you need into your .bib file.`
+        )
       }
 
       default:
