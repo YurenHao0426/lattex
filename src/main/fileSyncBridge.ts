@@ -282,8 +282,11 @@ export class FileSyncBridge {
       }
     }
 
-    // For non-editor docs, handle ack (op with no ops array = ack for our own op)
-    if (!this.editorDocs.has(docId) && !update.op) {
+    // Handle ack — process even for editor docs so the bridge's OtClient
+    // can finish pending ops (e.g. ops sent just before addEditorDoc was called).
+    // Without this, the OtClient stays stuck in awaitingConfirm and the ops
+    // appear lost until removeEditorDoc re-discovers the discrepancy.
+    if (!update.op) {
       const otClient = this.otClients.get(docId)
       if (otClient) {
         otClient.onAck()
@@ -298,7 +301,12 @@ export class FileSyncBridge {
     const error = args[0] as { doc?: string; message?: string } | undefined
     if (!error?.doc) return
     const docId = error.doc
-    if (this.editorDocs.has(docId)) return // renderer handles editor docs
+
+    // Don't skip editor docs entirely — the bridge may have sent ops just before
+    // addEditorDoc was called, and the error response arrives after. If we skip,
+    // the bridge's OtClient stays stuck and the ops are silently lost.
+    // Only skip if the bridge has no OtClient for this doc.
+    if (this.editorDocs.has(docId) && !this.otClients.has(docId)) return
 
     const relPath = this.docPathMap[docId]
     if (!relPath) return
