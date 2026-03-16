@@ -814,11 +814,12 @@ ipcMain.handle('ot:connect', async (_e, projectId: string) => {
 
 > **IMPORTANT — MANDATORY FIRST STEPS (do this EVERY conversation before ANY edits):**
 >
-> 1. **Read \`${rootDocPath}\`** and ALL files it \\\\input/\\\\include to understand the full paper structure, notation, and conventions. You MUST NOT skip this step or make any edits before completing it.
-> 2. **Run \`get_comments\`** to check for reviewer comments, TODOs, or ongoing discussions.
-> 3. Only AFTER completing steps 1–2 may you proceed with the user's request.
+> 1. **Read \`${rootDocPath}\`** to discover the paper structure — identify every \\\\input{} and \\\\include{} file.
+> 2. **Read EVERY file** found in step 1, one by one. This means reading the full content of each .tex file listed below. Do NOT skip any file. Do NOT skim. You need to understand the paper's argument, notation, macro usage, and conventions before touching anything.
+> 3. **Run \`get_comments\`** to check for reviewer comments, TODOs, or ongoing discussions.
+> 4. Only AFTER completing steps 1–3 may you proceed with the user's request.
 >
-> This is a live Overleaf project — your edits appear to collaborators in real-time. Careless changes to a document you haven't read will break things.
+> This is a live Overleaf project — your edits appear to collaborators in real-time. Careless changes to a document you haven't fully read WILL break things and waste collaborators' time.
 
 This is a LaTeX project synced from Overleaf via LatteX. All files here are **bidirectionally synced** — your edits appear on Overleaf in real-time, and vice versa.
 ${currentUserName ? `\n**You are logged in as: ${currentUserName}** — this is the name that appears on comments and edits. The project owner is ${ownerName}.` : `\n**Project owner**: ${ownerName}`}
