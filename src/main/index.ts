@@ -891,7 +891,7 @@ You have MCP tools to interact with Overleaf. Use them proactively.
 - **read_compiled_pdf**: Get the path to the compiled PDF. After calling this, use your **Read** tool on the returned path to visually inspect the PDF. Use the \`pages\` parameter (e.g. \`"1-3"\`) to read specific pages. This lets you verify formatting, figures, tables, and layout.
 
 ### Bibliography
-- **search_citation**: Search academic papers by title, topic, or author. Returns matching papers with ready-to-use BibTeX entries that can be pasted directly into a \`.bib\` file.
+- **search_citation**: Search academic papers by title, topic, or author. Returns matching papers with ready-to-use BibTeX entries that can be pasted directly into a \`.bib\` file. **Note:** Without a Semantic Scholar API key configured in LatteX settings, requests will likely be rate-limited (HTTP 429). With a key, the rate limit is 1 request/second.
 
 ### Workflows
 
