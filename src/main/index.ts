@@ -47,6 +47,31 @@ async function writeMcpState(): Promise<void> {
   } catch { /* ignore */ }
 }
 
+let commentContextRefreshTimer: ReturnType<typeof setTimeout> | null = null
+function scheduleCommentContextRefresh(): void {
+  if (commentContextRefreshTimer) clearTimeout(commentContextRefreshTimer)
+  commentContextRefreshTimer = setTimeout(async () => {
+    commentContextRefreshTimer = null
+    if (!overleafSock?.projectData) return
+    const { docPathMap: dp } = walkRootFolder(overleafSock.projectData.project.rootFolder)
+    const contexts: Record<string, { file: string; text: string; pos: number }> = {}
+    for (const [did, rp] of Object.entries(dp)) {
+      try {
+        const result = await overleafSock.joinDoc(did)
+        if (result.ranges?.comments) {
+          for (const c of result.ranges.comments) {
+            if (c.op?.t) contexts[c.op.t] = { file: rp, text: c.op.c || '', pos: c.op.p || 0 }
+          }
+        }
+        // Don't leaveDoc — bridge keeps all docs joined
+      } catch { /* ignore */ }
+    }
+    mcpCommentContexts = contexts
+    writeMcpState()
+    sendToRenderer('comments:initContexts', { contexts })
+  }, 2000) // 2s debounce
+}
+
 function writeMcpOnlineUsers(): void {
   if (!mcpStateDir) return
   if (mcpOnlineUsersWriteTimer) clearTimeout(mcpOnlineUsersWriteTimer)
@@ -776,6 +801,10 @@ ipcMain.handle('ot:connect', async (_e, projectId: string) => {
         name === 'delete-message'
       ) {
         sendToRenderer('comments:event', { type: name, args })
+        // Re-fetch comment contexts for MCP when comments change
+        if (name === 'new-comment' || name === 'delete-thread') {
+          scheduleCommentContextRefresh()
+        }
       }
     })
 
@@ -968,14 +997,13 @@ The \`claude-workspace/\` directory is your private scratch space. It is **not s
       const contexts: Record<string, { file: string; text: string; pos: number }> = {}
       for (const [did, rp] of Object.entries(dp)) {
         try {
-          const alreadyJoined = docEventHandlers.has(did)
           const result = await overleafSock.joinDoc(did)
           if (result.ranges?.comments) {
             for (const c of result.ranges.comments) {
               if (c.op?.t) contexts[c.op.t] = { file: rp, text: c.op.c || '', pos: c.op.p || 0 }
             }
           }
-          if (!alreadyJoined) await overleafSock.leaveDoc(did)
+          // Don't leaveDoc — bridge keeps all docs joined
         } catch { /* ignore */ }
       }
       mcpCommentContexts = contexts

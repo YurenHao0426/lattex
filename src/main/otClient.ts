@@ -1,7 +1,17 @@
 // Copyright (c) 2026 Yuren Hao
 // Licensed under AGPL-3.0 - see LICENSE file
 
-// OT state machine for main process (mirror of renderer otClient)
+// OT state machine for main process
+// Modeled after Overleaf's ShareJS client (vendor/libs/sharejs.js)
+//
+// States:
+//   synchronized     — no pending ops, version matches server
+//   awaitingConfirm  — one inflight op awaiting server ack
+//   awaitingWithBuffer — inflight + buffered local ops
+//
+// Key invariant: at most ONE inflight op at a time.
+// Version increments by 1 on each ack or remote op.
+
 import type { OtOp } from './otTypes'
 import { transformOps } from './otTransform'
 
@@ -66,6 +76,15 @@ export class OtClient {
     }
   }
 
+  /**
+   * Server acknowledged our inflight op.
+   * Matches Overleaf's ShareJS: both "ack without ops" and "echoed ops from
+   * our own source" are treated as acks. The echoed ops are NOT re-applied
+   * because they were already applied optimistically when submitted.
+   *
+   * In synchronized state, silently drops (duplicate ack — common when server
+   * sends both an echo and a separate ack event).
+   */
   onAck() {
     switch (this.state.name) {
       case 'awaitingConfirm':
@@ -90,12 +109,25 @@ export class OtClient {
       }
 
       case 'synchronized':
-        console.warn('[OtClient:main] unexpected ack in synchronized state')
+        // Duplicate ack — silently drop.
+        // This is expected: server may send both an echoed op (with meta.source)
+        // and a separate ack event (without ops). The first one transitions us
+        // to synchronized, the second arrives when we're already there.
         break
     }
   }
 
+  /**
+   * Server sent a remote op from another client.
+   * Transform against inflight/buffered ops before applying.
+   */
   onRemoteOps(ops: OtOp[], newVersion: number) {
+    // Stale message detection (matching Overleaf's ShareJS):
+    // if the server version is behind our version, we already processed this.
+    if (newVersion < this.state.version) {
+      return
+    }
+
     switch (this.state.name) {
       case 'synchronized':
         this.state = { ...this.state, version: newVersion }

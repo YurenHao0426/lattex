@@ -268,30 +268,60 @@ export class FileSyncBridge {
   }
 
   // ── OT update handler ─────────────────────────────────────
+  //
+  // Modeled after Overleaf's ShareJS _onMessage (vendor/libs/sharejs.js):
+  //
+  //   ACK = msg.op === undefined          (explicit ack, no ops)
+  //       | msg.meta.source === ourId     (echo of our own ops)
+  //
+  //   REMOTE = msg.op && msg.meta.source !== ourId
+  //
+  // The ACK path does NOT re-apply ops (they were applied optimistically).
+  // The REMOTE path transforms against inflight/buffered ops before applying.
+  // Stale messages (version < ours) are silently dropped by OtClient.
 
   private handleOtUpdate(args: unknown[]): void {
-    const update = args[0] as { doc?: string; op?: OtOp[]; v?: number } | undefined
+    const update = args[0] as { doc?: string; op?: OtOp[]; v?: number; meta?: { source?: string } } | undefined
     if (!update?.doc) return
     const docId = update.doc
+    const relPath = this.docPathMap[docId] || docId
 
-    // For non-editor docs, process remote ops through bridge's OtClient
-    if (!this.editorDocs.has(docId) && update.op && update.v !== undefined) {
-      const otClient = this.otClients.get(docId)
-      if (otClient) {
-        otClient.onRemoteOps(update.op, update.v)
-      }
-    }
+    // Skip editor docs — renderer handles their OT
+    if (this.editorDocs.has(docId)) return
 
-    // Handle ack — process even for editor docs so the bridge's OtClient
-    // can finish pending ops (e.g. ops sent just before addEditorDoc was called).
-    // Without this, the OtClient stays stuck in awaitingConfirm and the ops
-    // appear lost until removeEditorDoc re-discovers the discrepancy.
-    if (!update.op) {
-      const otClient = this.otClients.get(docId)
-      if (otClient) {
-        otClient.onAck()
-      }
+    const otClient = this.otClients.get(docId)
+    if (!otClient) return
+
+    const isOwnSource = this.isOwnSource(update.meta?.source)
+
+    bridgeLog(`[FileSyncBridge] handleOtUpdate: ${relPath} v=${update.v} hasOp=${!!update.op} own=${isOwnSource} state=${otClient.stateName} ver=${otClient.version}`)
+
+    if (!update.op || isOwnSource) {
+      // ACK — either:
+      //   1. No ops (explicit ack from server to sender)
+      //   2. Echoed ops from our own source (server broadcast to all clients)
+      // In both cases: acknowledge the inflight op. Do NOT re-apply ops.
+      // OtClient.onAck() silently drops duplicate acks (synchronized state).
+      bridgeLog(`[FileSyncBridge] handleOtUpdate: ACK for ${relPath} (${!update.op ? 'no-op' : 'own-echo'}), state=${otClient.stateName}`)
+      otClient.onAck()
+      bridgeLog(`[FileSyncBridge] handleOtUpdate: ACK done → state=${otClient.stateName} ver=${otClient.version}`)
+    } else if (update.op && update.v !== undefined) {
+      // REMOTE — genuine ops from another client
+      bridgeLog(`[FileSyncBridge] handleOtUpdate: REMOTE ops for ${relPath} from ${update.meta?.source || 'unknown'}, state=${otClient.stateName}`)
+      otClient.onRemoteOps(update.op, update.v)
     }
+  }
+
+  /** Check if an otUpdateApplied event originated from our own socket */
+  private isOwnSource(metaSource?: string): boolean {
+    // Primary: match meta.source against our publicId (same as Overleaf's inflightSubmittedIds check)
+    if (metaSource && this.socket.publicId) {
+      return metaSource === this.socket.publicId
+    }
+    // If meta.source is absent, we can't determine origin.
+    // The open-source server sends ack without meta to the sender (no ops, no meta.source).
+    // If we get ops WITHOUT meta.source, treat conservatively as remote.
+    return false
   }
 
   // ── OT error handler ────────────────────────────────────────
@@ -311,7 +341,7 @@ export class FileSyncBridge {
     const relPath = this.docPathMap[docId]
     if (!relPath) return
 
-    bridgeLog(`[FileSyncBridge] otUpdateError for ${relPath}: ${error.message || 'unknown'}`)
+    bridgeLog(`[FileSyncBridge] OT_ERROR for ${relPath}: ${error.message || JSON.stringify(error)}`)
 
     // Re-join the doc to get fresh version and content, then re-apply disk content if different
     this.socket.joinDoc(docId).then(async (result) => {
@@ -796,7 +826,18 @@ export class FileSyncBridge {
     const relPath = this.docPathMap[docId]
     const content = relPath ? this.lastKnownContent.get(relPath) ?? '' : ''
     const hash = createHash('sha1').update(content).digest('hex')
-    this.socket.applyOtUpdate(docId, ops, version, hash)
+    bridgeLog(`[FileSyncBridge] sendOps: ${relPath} v${version} ${ops.length} ops, hash=${hash.slice(0, 8)}`)
+    this.socket.applyOtUpdate(docId, ops, version, hash).then(() => {
+      bridgeLog(`[FileSyncBridge] sendOps: server accepted ${relPath}`)
+      // Do NOT call onAck() here.
+      // ACK comes via otUpdateApplied events processed in handleOtUpdate:
+      //   - Echo (with ops, meta.source === ours) → treated as ACK
+      //   - Explicit ack (without ops) → treated as ACK
+      // OtClient.onAck() silently deduplicates if both arrive.
+    }).catch((e) => {
+      bridgeLog(`[FileSyncBridge] sendOps: REJECTED for ${relPath}: ${e?.message || e}`)
+      this.handleOtError([{ doc: docId, message: e?.message || 'applyOtUpdate rejected' }])
+    })
   }
 
   // ── Apply remote ops (for non-editor docs) ──────────────────
