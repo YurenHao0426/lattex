@@ -64,6 +64,26 @@ async function prepareMcpServerPath(tmpDir: string): Promise<string> {
   return serverPath
 }
 
+async function clearDisabledLattexMcpServer(tmpDir: string): Promise<void> {
+  const settingsPath = join(tmpDir, '.claude', 'settings.local.json')
+  try {
+    const raw = await readFile(settingsPath, 'utf-8')
+    const settings = JSON.parse(raw) as Record<string, unknown>
+    const disabled = settings.disabledMcpjsonServers
+    if (!Array.isArray(disabled) || !disabled.includes('lattex')) return
+
+    const nextDisabled = disabled.filter((name) => name !== 'lattex')
+    if (nextDisabled.length > 0) {
+      settings.disabledMcpjsonServers = nextDisabled
+    } else {
+      delete settings.disabledMcpjsonServers
+    }
+    await writeFile(settingsPath, JSON.stringify(settings, null, 2))
+  } catch {
+    // No local settings yet, or not JSON. Claude can create it later.
+  }
+}
+
 let commentContextRefreshTimer: ReturnType<typeof setTimeout> | null = null
 function scheduleCommentContextRefresh(): void {
   if (commentContextRefreshTimer) clearTimeout(commentContextRefreshTimer)
@@ -854,11 +874,13 @@ ipcMain.handle('ot:connect', async (_e, projectId: string) => {
       await writeFile(join(tmpDir, '.mcp.json'), JSON.stringify({
         mcpServers: {
           lattex: {
+            type: 'stdio',
             command: 'node',
             args: [mcpServerPath]
           }
         }
       }, null, 2))
+      await clearDisabledLattexMcpServer(tmpDir)
     } catch (e) {
       console.log('[mcp] failed to write MCP config:', e)
     }
