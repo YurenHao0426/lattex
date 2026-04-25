@@ -3,7 +3,7 @@
 
 import { app, BrowserWindow, ipcMain, dialog, shell, net } from 'electron'
 import { join, basename, relative, extname } from 'path'
-import { readFile, writeFile, mkdir as mkdirAsync, unlink, readdir, stat } from 'fs/promises'
+import { copyFile, readFile, writeFile, mkdir as mkdirAsync, unlink, readdir, stat } from 'fs/promises'
 import { spawn } from 'child_process'
 import * as pty from 'node-pty'
 import { OverleafSocket, type RootFolder, type SubFolder, type JoinDocResult } from './overleafSocket'
@@ -45,6 +45,23 @@ async function writeMcpState(): Promise<void> {
     if (s2Key) state.semanticScholarApiKey = s2Key
     await writeFile(join(mcpStateDir, '.lattex-mcp.json'), JSON.stringify(state, null, 2))
   } catch { /* ignore */ }
+}
+
+async function prepareMcpServerPath(tmpDir: string): Promise<string> {
+  const sourcePath = app.isPackaged
+    ? join(app.getAppPath() + '.unpacked', 'out', 'mcp', 'lattex.mjs')
+    : join(__dirname, '..', '..', 'src', 'mcp', 'lattex.mjs')
+
+  if (!app.isPackaged) return sourcePath
+
+  // Unsigned macOS apps can be launched from an App Translocation path. That
+  // path is not stable enough to persist in .mcp.json, so copy the bundled MCP
+  // server into the live project directory and point Claude at the copy.
+  const mcpDir = join(tmpDir, '.lattex')
+  await mkdirAsync(mcpDir, { recursive: true })
+  const serverPath = join(mcpDir, 'lattex-mcp.mjs')
+  await copyFile(sourcePath, serverPath)
+  return serverPath
 }
 
 let commentContextRefreshTimer: ReturnType<typeof setTimeout> | null = null
@@ -828,20 +845,23 @@ ipcMain.handle('ot:connect', async (_e, projectId: string) => {
     mcpProjectId = projectId
     mcpCommentContexts = {}
     mcpPathDocMap = pathDocMap
-    writeMcpState()
+    await writeMcpState()
     // Write .mcp.json so Claude Code auto-discovers the MCP server
-    // Dev: use source file. Packaged: use bundled file in app.asar.unpacked/out/mcp/
-    const mcpServerPath = app.isPackaged
-      ? join(app.getAppPath() + '.unpacked', 'out', 'mcp', 'lattex.mjs')
-      : join(__dirname, '..', '..', 'src', 'mcp', 'lattex.mjs')
-    writeFile(join(tmpDir, '.mcp.json'), JSON.stringify({
-      mcpServers: {
-        lattex: {
-          command: 'node',
-          args: [mcpServerPath]
+    // Dev: use source file. Packaged: copy bundled server into the project
+    // temp dir so .mcp.json never contains a stale App Translocation path.
+    try {
+      const mcpServerPath = await prepareMcpServerPath(tmpDir)
+      await writeFile(join(tmpDir, '.mcp.json'), JSON.stringify({
+        mcpServers: {
+          lattex: {
+            command: 'node',
+            args: [mcpServerPath]
+          }
         }
-      }
-    }, null, 2)).catch(() => {})
+      }, null, 2))
+    } catch (e) {
+      console.log('[mcp] failed to write MCP config:', e)
+    }
     // Clean up old root-level CLAUDE.md (was incorrectly placed there before)
     require('fs').unlink(join(tmpDir, 'CLAUDE.md'), () => {})
     // Create claude-workspace/ for Claude Code scratch space (not synced to Overleaf)
