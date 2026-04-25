@@ -3,7 +3,7 @@
 
 // Bidirectional file sync bridge: temp dir ↔ Overleaf via OT (text) + REST (binary)
 import { join, dirname } from 'path'
-import { readFile, writeFile, mkdir, unlink, rename as fsRename, appendFile, readdir } from 'fs/promises'
+import { readFile, writeFile, mkdir, unlink, rename as fsRename, appendFile, readdir, rm } from 'fs/promises'
 import { createHash } from 'crypto'
 import * as chokidar from 'chokidar'
 import { diff_match_patch } from 'diff-match-patch'
@@ -53,6 +53,8 @@ export class FileSyncBridge {
   private pathDocMap: Record<string, string>    // relPath → docId
   private fileRefPathMap: Record<string, string> // fileRefId → relPath
   private pathFileRefMap: Record<string, string> // relPath → fileRefId
+  private folderPathMap: Record<string, string>  // folderId → relDirPath (no trailing slash)
+  private pathFolderMap: Record<string, string>  // relDirPath (no trailing slash) → folderId
   private mainWindow: BrowserWindow
   private projectId: string
   private cookie: string
@@ -89,6 +91,10 @@ export class FileSyncBridge {
       this.fileRefPathMap[ref.id] = ref.path
       this.pathFileRefMap[ref.path] = ref.id
     }
+
+    this.folderPathMap = {}
+    this.pathFolderMap = {}
+    this.rebuildFolderMaps()
   }
 
   async start(): Promise<void> {
@@ -122,10 +128,14 @@ export class FileSyncBridge {
         this.handleNewFile(args)
       } else if (name === 'reciveNewDoc') {
         this.handleNewDoc(args)
+      } else if (name === 'reciveNewFolder') {
+        this.handleNewFolder(args)
       } else if (name === 'removeEntity') {
         this.handleRemoveEntity(args)
       } else if (name === 'reciveEntityRename') {
         this.handleEntityRename(args)
+      } else if (name === 'reciveEntityMove') {
+        this.handleEntityMove(args)
       }
     }
     this.socket.on('serverEvent', this.serverEventHandler)
@@ -405,6 +415,7 @@ export class FileSyncBridge {
     // Register in maps
     this.fileRefPathMap[fileRef._id] = relPath
     this.pathFileRefMap[relPath] = fileRef._id
+    this.notifyEntityCreated('file', fileRef._id, relPath, fileRef.name, folderId)
 
     // Download to disk
     this.downloadBinary(fileRef._id, relPath).catch((e) => {
@@ -433,6 +444,7 @@ export class FileSyncBridge {
     // Register in maps
     this.docPathMap[doc._id] = relPath
     this.pathDocMap[relPath] = doc._id
+    this.notifyEntityCreated('doc', doc._id, relPath, doc.name, folderId)
 
     // Join and sync the new doc
     this.socket.joinDoc(doc._id).then((result) => {
@@ -452,6 +464,24 @@ export class FileSyncBridge {
     })
   }
 
+  /** Remote: new folder added to project */
+  private handleNewFolder(args: unknown[]): void {
+    // args: [parentFolderId, folder, userId]
+    const parentFolderId = args[0] as string
+    const folder = args[1] as { _id: string; name: string } | undefined
+    if (!folder?._id || !folder?.name) return
+
+    const parentPath = this.folderPathMap[parentFolderId] ?? ''
+    const relPath = parentPath ? `${parentPath}/${folder.name}` : folder.name
+
+    bridgeLog(`[FileSyncBridge] remote new folder: ${relPath} (${folder._id})`)
+
+    this.folderPathMap[folder._id] = relPath
+    this.pathFolderMap[relPath] = folder._id
+    this.createdFolders.set(relPath, folder._id)
+    this.notifyEntityCreated('folder', folder._id, relPath, folder.name, parentFolderId)
+  }
+
   /** Remote: entity removed */
   private handleRemoveEntity(args: unknown[]): void {
     const entityId = args[0] as string
@@ -465,6 +495,7 @@ export class FileSyncBridge {
       delete this.pathDocMap[docPath]
       this.lastKnownContent.delete(docPath)
       this.otClients.delete(entityId)
+      this.notifyEntityRemoved('doc', entityId, docPath)
       this.deleteFromDisk(docPath)
       return
     }
@@ -476,7 +507,18 @@ export class FileSyncBridge {
       delete this.fileRefPathMap[entityId]
       delete this.pathFileRefMap[filePath]
       this.binaryHashes.delete(filePath)
+      this.notifyEntityRemoved('file', entityId, filePath)
       this.deleteFromDisk(filePath)
+      return
+    }
+
+    // Check if it's a folder
+    const folderPath = this.folderPathMap[entityId]
+    if (folderPath !== undefined) {
+      bridgeLog(`[FileSyncBridge] remote remove folder: ${folderPath}`)
+      this.removeFolderMappings(entityId)
+      this.notifyEntityRemoved('folder', entityId, folderPath)
+      this.deleteDirFromDisk(folderPath)
     }
   }
 
@@ -505,6 +547,7 @@ export class FileSyncBridge {
       }
 
       // Rename on disk
+      this.notifyEntityRenamed('doc', entityId, oldDocPath, newPath, newName)
       this.renameOnDisk(oldDocPath, newPath)
       return
     }
@@ -528,12 +571,87 @@ export class FileSyncBridge {
       }
 
       // Rename on disk
+      this.notifyEntityRenamed('file', entityId, oldFilePath, newPath, newName)
       this.renameOnDisk(oldFilePath, newPath)
+      return
+    }
+
+    // Check if it's a folder
+    const oldFolderPath = this.folderPathMap[entityId]
+    if (oldFolderPath !== undefined) {
+      const parent = dirname(oldFolderPath)
+      const newPath = parent === '.' ? newName : parent + '/' + newName
+      bridgeLog(`[FileSyncBridge] remote rename folder: ${oldFolderPath} → ${newPath}`)
+
+      this.rewriteFolderPath(entityId, newPath)
+      this.notifyEntityRenamed('folder', entityId, oldFolderPath, newPath, newName)
+      this.renameOnDisk(oldFolderPath, newPath)
+    }
+  }
+
+  /** Remote: entity moved */
+  private handleEntityMove(args: unknown[]): void {
+    const entityId = args[0] as string
+    const toFolderId = args[1] as string
+    if (!entityId || !toFolderId) return
+
+    const parentPath = this.folderPathMap[toFolderId] ?? ''
+    const buildNewPath = (oldPath: string) => {
+      const name = oldPath.split('/').filter(Boolean).pop() || oldPath
+      return parentPath ? `${parentPath}/${name}` : name
+    }
+
+    const oldDocPath = this.docPathMap[entityId]
+    if (oldDocPath) {
+      const newPath = buildNewPath(oldDocPath)
+      bridgeLog(`[FileSyncBridge] remote move doc: ${oldDocPath} → ${newPath}`)
+      this.docPathMap[entityId] = newPath
+      delete this.pathDocMap[oldDocPath]
+      this.pathDocMap[newPath] = entityId
+      const content = this.lastKnownContent.get(oldDocPath)
+      if (content !== undefined) {
+        this.lastKnownContent.delete(oldDocPath)
+        this.lastKnownContent.set(newPath, content)
+      }
+      this.notifyEntityMoved('doc', entityId, oldDocPath, newPath, toFolderId)
+      this.renameOnDisk(oldDocPath, newPath)
+      return
+    }
+
+    const oldFilePath = this.fileRefPathMap[entityId]
+    if (oldFilePath) {
+      const newPath = buildNewPath(oldFilePath)
+      bridgeLog(`[FileSyncBridge] remote move file: ${oldFilePath} → ${newPath}`)
+      this.fileRefPathMap[entityId] = newPath
+      delete this.pathFileRefMap[oldFilePath]
+      this.pathFileRefMap[newPath] = entityId
+      const hash = this.binaryHashes.get(oldFilePath)
+      if (hash) {
+        this.binaryHashes.delete(oldFilePath)
+        this.binaryHashes.set(newPath, hash)
+      }
+      this.notifyEntityMoved('file', entityId, oldFilePath, newPath, toFolderId)
+      this.renameOnDisk(oldFilePath, newPath)
+      return
+    }
+
+    const oldFolderPath = this.folderPathMap[entityId]
+    if (oldFolderPath !== undefined) {
+      const newPath = buildNewPath(oldFolderPath)
+      bridgeLog(`[FileSyncBridge] remote move folder: ${oldFolderPath} → ${newPath}`)
+      this.rewriteFolderPath(entityId, newPath)
+      this.notifyEntityMoved('folder', entityId, oldFolderPath, newPath, toFolderId)
+      this.renameOnDisk(oldFolderPath, newPath)
     }
   }
 
   /** Find folder path prefix from folderId */
   private findFolderPath(folderId: string): string {
+    if (folderId in this.folderPathMap) {
+      const path = this.folderPathMap[folderId]
+      return path ? `${path}/` : ''
+    }
+
     const projectData = this.socket.projectData
     if (projectData) {
       const rootFolder = projectData.project.rootFolder?.[0]
@@ -722,7 +840,7 @@ export class FileSyncBridge {
     })
   }
 
-  private async uploadBinary(relPath: string, fileData: Buffer, overrideFolderId?: string): Promise<void> {
+  private async uploadBinary(relPath: string, fileData: Buffer, overrideFolderId?: string): Promise<string | undefined> {
     const fileName = relPath.includes('/') ? relPath.split('/').pop()! : relPath
     const folderId = overrideFolderId || this.findFolderIdForPath(relPath)
 
@@ -767,13 +885,14 @@ export class FileSyncBridge {
             const data = JSON.parse(resBody)
             if (data.success !== false && !data.error) {
               // Upload replaces the file — update our fileRef ID if it changed
-              if (data.entity_id && data.entity_id !== this.pathFileRefMap[relPath]) {
+              const entityId = data.entity_id || data.entityId || data.fileRef?._id || data.file?._id
+              if (entityId && entityId !== this.pathFileRefMap[relPath]) {
                 const oldId = this.pathFileRefMap[relPath]
                 if (oldId) delete this.fileRefPathMap[oldId]
-                this.fileRefPathMap[data.entity_id] = relPath
-                this.pathFileRefMap[relPath] = data.entity_id
+                this.fileRefPathMap[entityId] = relPath
+                this.pathFileRefMap[relPath] = entityId
               }
-              resolve()
+              resolve(entityId)
             } else {
               reject(new Error(data.error || 'Upload failed'))
             }
@@ -793,6 +912,10 @@ export class FileSyncBridge {
     const projectData = this.socket.projectData
     const rootId = projectData?.project.rootFolder?.[0]?._id || ''
     const dir = dirname(relPath)
+    const normalizedDir = dir === '.' ? '' : dir
+    if (normalizedDir in this.pathFolderMap) return this.pathFolderMap[normalizedDir]
+    const cached = this.createdFolders.get(normalizedDir)
+    if (cached) return cached
     if (dir === '.') return rootId
 
     // Search inside root folder's children (skip root folder name)
@@ -818,6 +941,162 @@ export class FileSyncBridge {
       }
     }
     return null
+  }
+
+  private rebuildFolderMaps(): void {
+    this.folderPathMap = {}
+    this.pathFolderMap = {}
+
+    const rootFolder = this.socket.projectData?.project.rootFolder?.[0]
+    if (!rootFolder) return
+
+    this.folderPathMap[rootFolder._id] = ''
+    this.pathFolderMap[''] = rootFolder._id
+
+    const walk = (folders: Array<{ _id: string; name: string; folders?: unknown[] }>, prefix: string) => {
+      for (const folder of folders) {
+        const relPath = prefix ? `${prefix}/${folder.name}` : folder.name
+        this.folderPathMap[folder._id] = relPath
+        this.pathFolderMap[relPath] = folder._id
+        const children = folder.folders as Array<{ _id: string; name: string; folders?: unknown[] }> | undefined
+        if (children) walk(children, relPath)
+      }
+    }
+
+    const children = rootFolder.folders as Array<{ _id: string; name: string; folders?: unknown[] }> | undefined
+    if (children) walk(children, '')
+  }
+
+  private removeFolderMappings(folderId: string): void {
+    const folderPath = this.folderPathMap[folderId]
+    if (folderPath === undefined) return
+    const prefix = folderPath ? `${folderPath}/` : ''
+
+    for (const [docId, relPath] of Object.entries(this.docPathMap)) {
+      if (prefix && relPath.startsWith(prefix)) {
+        delete this.docPathMap[docId]
+        delete this.pathDocMap[relPath]
+        this.lastKnownContent.delete(relPath)
+        this.otClients.delete(docId)
+      }
+    }
+
+    for (const [fileRefId, relPath] of Object.entries(this.fileRefPathMap)) {
+      if (prefix && relPath.startsWith(prefix)) {
+        delete this.fileRefPathMap[fileRefId]
+        delete this.pathFileRefMap[relPath]
+        this.binaryHashes.delete(relPath)
+      }
+    }
+
+    for (const [id, relPath] of Object.entries(this.folderPathMap)) {
+      if (id === folderId || (prefix && relPath.startsWith(prefix))) {
+        delete this.folderPathMap[id]
+        delete this.pathFolderMap[relPath]
+        this.createdFolders.delete(relPath)
+      }
+    }
+  }
+
+  private rewriteFolderPath(folderId: string, newFolderPath: string): void {
+    const oldFolderPath = this.folderPathMap[folderId]
+    if (oldFolderPath === undefined) return
+
+    const oldPrefix = oldFolderPath ? `${oldFolderPath}/` : ''
+    const newPrefix = newFolderPath ? `${newFolderPath}/` : ''
+
+    for (const [docId, relPath] of Object.entries(this.docPathMap)) {
+      if (oldPrefix && relPath.startsWith(oldPrefix)) {
+        const newPath = newPrefix + relPath.slice(oldPrefix.length)
+        this.docPathMap[docId] = newPath
+        delete this.pathDocMap[relPath]
+        this.pathDocMap[newPath] = docId
+        const content = this.lastKnownContent.get(relPath)
+        if (content !== undefined) {
+          this.lastKnownContent.delete(relPath)
+          this.lastKnownContent.set(newPath, content)
+        }
+      }
+    }
+
+    for (const [fileRefId, relPath] of Object.entries(this.fileRefPathMap)) {
+      if (oldPrefix && relPath.startsWith(oldPrefix)) {
+        const newPath = newPrefix + relPath.slice(oldPrefix.length)
+        this.fileRefPathMap[fileRefId] = newPath
+        delete this.pathFileRefMap[relPath]
+        this.pathFileRefMap[newPath] = fileRefId
+        const hash = this.binaryHashes.get(relPath)
+        if (hash) {
+          this.binaryHashes.delete(relPath)
+          this.binaryHashes.set(newPath, hash)
+        }
+      }
+    }
+
+    for (const [id, relPath] of Object.entries(this.folderPathMap)) {
+      if (id === folderId || (oldPrefix && relPath.startsWith(oldPrefix))) {
+        const nextPath = id === folderId
+          ? newFolderPath
+          : newPrefix + relPath.slice(oldPrefix.length)
+        delete this.pathFolderMap[relPath]
+        this.folderPathMap[id] = nextPath
+        this.pathFolderMap[nextPath] = id
+        this.createdFolders.delete(relPath)
+        this.createdFolders.set(nextPath, id)
+      }
+    }
+  }
+
+  private notifyEntityCreated(
+    kind: 'doc' | 'file' | 'folder',
+    entityId: string,
+    relPath: string,
+    name: string,
+    parentFolderId?: string
+  ): void {
+    this.mainWindow.webContents.send('sync:entityCreated', {
+      kind,
+      entityId,
+      relPath,
+      name,
+      parentFolderId
+    })
+  }
+
+  private notifyEntityRemoved(kind: 'doc' | 'file' | 'folder', entityId: string, relPath: string): void {
+    this.mainWindow.webContents.send('sync:entityRemoved', { kind, entityId, relPath })
+  }
+
+  private notifyEntityRenamed(
+    kind: 'doc' | 'file' | 'folder',
+    entityId: string,
+    oldPath: string,
+    newPath: string,
+    newName: string
+  ): void {
+    this.mainWindow.webContents.send('sync:entityRenamed', {
+      kind,
+      entityId,
+      oldPath,
+      newPath,
+      newName
+    })
+  }
+
+  private notifyEntityMoved(
+    kind: 'doc' | 'file' | 'folder',
+    entityId: string,
+    oldPath: string,
+    newPath: string,
+    parentFolderId: string
+  ): void {
+    this.mainWindow.webContents.send('sync:entityMoved', {
+      kind,
+      entityId,
+      oldPath,
+      newPath,
+      parentFolderId
+    })
   }
 
   // ── Send OT ops to Overleaf (for non-editor docs) ───────────
@@ -952,6 +1231,17 @@ export class FileSyncBridge {
     try {
       await unlink(fullPath)
     } catch { /* file may not exist */ }
+    setTimeout(() => {
+      this.writesInProgress.delete(relPath)
+    }, 150)
+  }
+
+  private async deleteDirFromDisk(relPath: string): Promise<void> {
+    const fullPath = join(this.tmpDir, relPath)
+    this.writesInProgress.add(relPath)
+    try {
+      await rm(fullPath, { recursive: true, force: true })
+    } catch { /* directory may not exist */ }
     setTimeout(() => {
       this.writesInProgress.delete(relPath)
     }, 150)
@@ -1112,8 +1402,9 @@ export class FileSyncBridge {
       this.lastKnownContent.set(relPath, serverContent)
     }
 
-    // Notify renderer about the new doc
-    this.mainWindow.webContents.send('sync:newDoc', { docId, relPath })
+    // Notify renderer about the new doc. The server will also echo
+    // reciveNewDoc, but pendingCreates makes us skip that duplicate.
+    this.notifyEntityCreated('doc', docId, relPath, fileName, folderId)
   }
 
   /** Upload a new binary file to Overleaf */
@@ -1125,18 +1416,25 @@ export class FileSyncBridge {
     const folderId = await this.ensureFolderExists(dir === '.' ? '' : dir)
 
     bridgeLog(`[FileSyncBridge] uploading new binary: ${relPath} (${fileData.length} bytes)`)
-    await this.uploadBinary(relPath, fileData, folderId)
+    const fileRefId = await this.uploadBinary(relPath, fileData, folderId)
     this.binaryHashes.set(relPath, createHash('sha1').update(fileData).digest('hex'))
 
     // Notify renderer
-    this.mainWindow.webContents.send('sync:newDoc', { docId: null, relPath })
+    if (fileRefId) {
+      this.notifyEntityCreated('file', fileRefId, relPath, relPath.split('/').pop() || relPath, folderId)
+    }
   }
 
   /** Ensure a folder path exists on Overleaf, creating intermediaries as needed */
   private async ensureFolderExists(dirPath: string): Promise<string> {
+    dirPath = dirPath.replace(/\/+$/, '')
+
     if (!dirPath || dirPath === '.') {
       return this.socket.projectData?.project.rootFolder?.[0]?._id || ''
     }
+
+    const known = this.pathFolderMap[dirPath]
+    if (known) return known
 
     // Check cache
     const cached = this.createdFolders.get(dirPath)
@@ -1170,6 +1468,8 @@ export class FileSyncBridge {
     if (result.ok && result.data?._id) {
       const folderId = result.data._id as string
       this.createdFolders.set(dirPath, folderId)
+      this.folderPathMap[folderId] = dirPath
+      this.pathFolderMap[dirPath] = folderId
       bridgeLog(`[FileSyncBridge] created folder "${folderName}" (${folderId})`)
       return folderId
     }
@@ -1219,6 +1519,16 @@ export class FileSyncBridge {
     return this.lastKnownContent.get(relPath)
   }
 
+  /** Get all synced text docs (used by compilation manager) */
+  getAllDocContents(): Array<{ path: string; content: string }> {
+    return Array.from(this.lastKnownContent.entries()).map(([path, content]) => ({ path, content }))
+  }
+
+  /** Get all known binary file refs (used by compilation manager) */
+  getFileRefs(): Array<{ id: string; path: string }> {
+    return Object.entries(this.fileRefPathMap).map(([id, path]) => ({ id, path }))
+  }
+
   /** Check if a doc's content is known */
   hasDoc(relPath: string): boolean {
     return this.lastKnownContent.has(relPath)
@@ -1252,9 +1562,9 @@ function diffsToOtOps(diffs: [number, string][]): OtOp[] {
 
 /** Apply OT ops to a text string */
 function applyOpsToText(text: string, ops: OtOp[]): string {
-  const sortedOps = [...ops].sort((a, b) => b.p - a.p)
-
-  for (const op of sortedOps) {
+  // ShareJS text operation components are sequential. Each component's
+  // position is relative to the document after earlier components ran.
+  for (const op of ops) {
     if (isInsert(op)) {
       text = text.slice(0, op.p) + op.i + text.slice(op.p)
     } else if (isDelete(op)) {

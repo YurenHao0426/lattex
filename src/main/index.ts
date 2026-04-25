@@ -752,12 +752,13 @@ ipcMain.handle('ot:connect', async (_e, projectId: string) => {
       sendToRenderer('ot:connectionState', state)
     })
 
-    // otUpdateApplied: server acknowledges our op (ack signal for OT client)
-    // Only ack when there's no 'op' field — presence of 'op' means it's a remote update, not our ack
+    // otUpdateApplied: server acknowledges our op with a no-op update on
+    // official Overleaf, but some deployments echo own-source ops instead.
     overleafSock.on('serverEvent', (name: string, args: unknown[]) => {
       if (name === 'otUpdateApplied') {
-        const update = args[0] as { doc?: string; op?: unknown[]; v?: number } | undefined
-        if (update?.doc && !update.op) {
+        const update = args[0] as { doc?: string; op?: unknown[]; v?: number; meta?: { source?: string } } | undefined
+        const isOwnSource = update?.meta?.source && update.meta.source === overleafSock?.publicId
+        if (update?.doc && (!update.op || isOwnSource)) {
           sendToRenderer('ot:ack', { docId: update.doc })
         }
       } else if (name === 'otUpdateError') {
@@ -1063,6 +1064,34 @@ ipcMain.handle('ot:disconnect', async () => {
 // Track per-doc event handlers for cleanup on leaveDoc
 const docEventHandlers = new Map<string, (name: string, args: unknown[]) => void>()
 
+function attachRendererDoc(docId: string): void {
+  if (!overleafSock) return
+
+  // Notify bridge that editor is taking over this doc
+  fileSyncBridge?.addEditorDoc(docId)
+
+  // Remove existing handler if re-attaching
+  const existingHandler = docEventHandlers.get(docId)
+  if (existingHandler) overleafSock.removeListener('serverEvent', existingHandler)
+
+  // Set up relay for remote ops on this doc
+  const handler = (name: string, args: unknown[]) => {
+    if (name === 'otUpdateApplied') {
+      const update = args[0] as { doc?: string; op?: unknown[]; v?: number; meta?: { source?: string } } | undefined
+      const isOwnSource = update?.meta?.source && update.meta.source === overleafSock?.publicId
+      if (update?.doc === docId && update.op && !isOwnSource) {
+        sendToRenderer('ot:remoteOp', {
+          docId: update.doc,
+          ops: update.op,
+          version: update.v
+        })
+      }
+    }
+  }
+  docEventHandlers.set(docId, handler)
+  overleafSock.on('serverEvent', handler)
+}
+
 ipcMain.handle('ot:joinDoc', async (_e, docId: string) => {
   if (!overleafSock) return { success: false, message: 'not_connected' }
 
@@ -1078,28 +1107,7 @@ ipcMain.handle('ot:joinDoc', async (_e, docId: string) => {
       }
     }
 
-    // Notify bridge that editor is taking over this doc
-    fileSyncBridge?.addEditorDoc(docId)
-
-    // Remove existing handler if rejoining
-    const existingHandler = docEventHandlers.get(docId)
-    if (existingHandler) overleafSock.removeListener('serverEvent', existingHandler)
-
-    // Set up relay for remote ops on this doc
-    const handler = (name: string, args: unknown[]) => {
-      if (name === 'otUpdateApplied') {
-        const update = args[0] as { doc?: string; op?: unknown[]; v?: number } | undefined
-        if (update?.doc === docId && update.op) {
-          sendToRenderer('ot:remoteOp', {
-            docId: update.doc,
-            ops: update.op,
-            version: update.v
-          })
-        }
-      }
-    }
-    docEventHandlers.set(docId, handler)
-    overleafSock.on('serverEvent', handler)
+    attachRendererDoc(docId)
 
     return {
       success: true,
@@ -1111,6 +1119,10 @@ ipcMain.handle('ot:joinDoc', async (_e, docId: string) => {
     console.log('[ot:joinDoc] error:', e)
     return { success: false, message: String(e) }
   }
+})
+
+ipcMain.handle('ot:attachDoc', async (_e, docId: string) => {
+  attachRendererDoc(docId)
 })
 
 ipcMain.handle('ot:leaveDoc', async (_e, docId: string) => {
@@ -1438,18 +1450,14 @@ ipcMain.handle('overleaf:socketCompile', async (_e, mainTexRelPath: string) => {
     return { success: false, log: 'No compilation manager or not connected', pdfPath: '' }
   }
 
-  const { docPathMap, fileRefs } = walkRootFolder(overleafSock.projectData.project.rootFolder)
-
   // Bridge already keeps all docs synced to disk. Sync content to compilation manager.
   if (fileSyncBridge) {
-    for (const [docId, relPath] of Object.entries(docPathMap)) {
-      const content = fileSyncBridge.getDocContent(relPath)
-      if (content !== undefined) {
-        compilationManager.setDocContent(relPath, content)
-      }
+    for (const { path, content } of fileSyncBridge.getAllDocContents()) {
+      compilationManager.setDocContent(path, content)
     }
   } else {
     // Fallback: fetch docs from socket if bridge isn't available
+    const { docPathMap } = walkRootFolder(overleafSock.projectData.project.rootFolder)
     const allDocIds = Object.keys(docPathMap)
     for (const docId of allDocIds) {
       const relPath = docPathMap[docId]
@@ -1469,6 +1477,9 @@ ipcMain.handle('overleaf:socketCompile', async (_e, mainTexRelPath: string) => {
   }
 
   // Download all binary files (images, .bst, etc.)
+  const fileRefs = fileSyncBridge
+    ? fileSyncBridge.getFileRefs()
+    : walkRootFolder(overleafSock.projectData.project.rootFolder).fileRefs
   await compilationManager.syncBinaries(fileRefs)
 
   return compilationManager.compile(mainTexRelPath, (data) => {

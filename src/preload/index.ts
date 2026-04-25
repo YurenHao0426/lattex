@@ -92,6 +92,7 @@ const api = {
       message?: string
     }>,
   otLeaveDoc: (docId: string) => ipcRenderer.invoke('ot:leaveDoc', docId),
+  otAttachDoc: (docId: string) => ipcRenderer.invoke('ot:attachDoc', docId),
   otSendOp: (docId: string, ops: unknown[], version: number, hash: string) =>
     ipcRenderer.invoke('ot:sendOp', docId, ops, version, hash),
   otFetchAllCommentContexts: () =>
@@ -183,6 +184,70 @@ const api = {
     const handler = (_e: Electron.IpcRendererEvent, data: { docId: string | null; relPath: string }) => cb(data)
     ipcRenderer.on('sync:newDoc', handler)
     return () => ipcRenderer.removeListener('sync:newDoc', handler)
+  },
+  onSyncEntityCreated: (cb: (data: {
+    kind: 'doc' | 'file' | 'folder'
+    entityId: string
+    relPath: string
+    name: string
+    parentFolderId?: string
+  }) => void) => {
+    const handler = (_e: Electron.IpcRendererEvent, data: {
+      kind: 'doc' | 'file' | 'folder'
+      entityId: string
+      relPath: string
+      name: string
+      parentFolderId?: string
+    }) => cb(data)
+    ipcRenderer.on('sync:entityCreated', handler)
+    return () => ipcRenderer.removeListener('sync:entityCreated', handler)
+  },
+  onSyncEntityRemoved: (cb: (data: {
+    kind: 'doc' | 'file' | 'folder'
+    entityId: string
+    relPath: string
+  }) => void) => {
+    const handler = (_e: Electron.IpcRendererEvent, data: {
+      kind: 'doc' | 'file' | 'folder'
+      entityId: string
+      relPath: string
+    }) => cb(data)
+    ipcRenderer.on('sync:entityRemoved', handler)
+    return () => ipcRenderer.removeListener('sync:entityRemoved', handler)
+  },
+  onSyncEntityRenamed: (cb: (data: {
+    kind: 'doc' | 'file' | 'folder'
+    entityId: string
+    oldPath: string
+    newPath: string
+    newName: string
+  }) => void) => {
+    const handler = (_e: Electron.IpcRendererEvent, data: {
+      kind: 'doc' | 'file' | 'folder'
+      entityId: string
+      oldPath: string
+      newPath: string
+      newName: string
+    }) => cb(data)
+    ipcRenderer.on('sync:entityRenamed', handler)
+    return () => ipcRenderer.removeListener('sync:entityRenamed', handler)
+  },
+  onSyncEntityMoved: (cb: (data: {
+    kind: 'doc' | 'file' | 'folder'
+    entityId: string
+    oldPath: string
+    newPath: string
+    parentFolderId: string
+  }) => void) => {
+    const handler = (_e: Electron.IpcRendererEvent, data: {
+      kind: 'doc' | 'file' | 'folder'
+      entityId: string
+      oldPath: string
+      newPath: string
+      parentFolderId: string
+    }) => cb(data)
+    ipcRenderer.on('sync:entityMoved', handler)
+    return () => ipcRenderer.removeListener('sync:entityMoved', handler)
   },
 
   // Cursor tracking

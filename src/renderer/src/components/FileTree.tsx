@@ -176,8 +176,6 @@ export default function FileTree() {
     const result = await window.api.overleafRenameEntity(projectId, entityType, entityId, newName.trim())
     if (result.success) {
       useAppStore.getState().setStatusMessage(`Renamed to ${newName.trim()}`)
-      // Reconnect to refresh file tree
-      await reconnectProject(projectId)
     } else {
       useAppStore.getState().setStatusMessage(`Rename failed: ${result.message}`)
     }
@@ -210,7 +208,6 @@ export default function FileTree() {
     const result = await window.api.overleafDeleteEntity(projectId, entityType, entityId)
     if (result.success) {
       useAppStore.getState().setStatusMessage(`Deleted ${node.name}`)
-      await reconnectProject(projectId)
     } else {
       useAppStore.getState().setStatusMessage(`Delete failed: ${result.message}`)
     }
@@ -233,7 +230,6 @@ export default function FileTree() {
     const result = await window.api.overleafCreateDoc(projectId, parentId, name.trim())
     if (result.success) {
       useAppStore.getState().setStatusMessage(`Created ${name.trim()}`)
-      await reconnectProject(projectId)
     } else {
       useAppStore.getState().setStatusMessage(`Create failed: ${result.message}`)
     }
@@ -256,7 +252,6 @@ export default function FileTree() {
     const result = await window.api.overleafCreateFolder(projectId, parentId, name.trim())
     if (result.success) {
       useAppStore.getState().setStatusMessage(`Created folder ${name.trim()}`)
-      await reconnectProject(projectId)
     } else {
       useAppStore.getState().setStatusMessage(`Create failed: ${result.message}`)
     }
@@ -304,8 +299,6 @@ export default function FileTree() {
       }
     }
 
-    // Refresh file tree
-    await reconnectProject(projectId)
   }, [])
 
   const handleOpenInOverleaf = () => {
@@ -375,17 +368,4 @@ export default function FileTree() {
       )}
     </div>
   )
-}
-
-/** Reconnect to refresh the file tree after a file operation */
-async function reconnectProject(projectId: string) {
-  const result = await window.api.otConnect(projectId)
-  if (result.success) {
-    const store = useAppStore.getState()
-    if (result.files) store.setFiles(result.files as any)
-    if (result.project) store.setOverleafProject(result.project)
-    if (result.docPathMap && result.pathDocMap) store.setDocMaps(result.docPathMap, result.pathDocMap)
-    if (result.fileRefs) store.setFileRefs(result.fileRefs)
-    if (result.rootFolderId) store.setRootFolderId(result.rootFolderId)
-  }
 }

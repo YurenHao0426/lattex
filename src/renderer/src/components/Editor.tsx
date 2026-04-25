@@ -218,6 +218,7 @@ export default function Editor() {
       const docId = pathDocMap[activeTab]
       const version = docId ? docVersions[docId] : undefined
       if (docId && version !== undefined) {
+        window.api.otAttachDoc(docId)
         const docSync = new OverleafDocSync(docId, version)
         docSyncRef.current = docSync
         activeDocSyncs.set(docId, docSync)

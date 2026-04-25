@@ -18,6 +18,12 @@ import SearchPanel from './components/SearchPanel'
 import StatusBar from './components/StatusBar'
 import type { OverleafDocSync } from './ot/overleafSync'
 import { colorForUser, type RemoteCursor } from './extensions/remoteCursors'
+import {
+  applyEntityCreated,
+  applyEntityMoved,
+  applyEntityRemoved,
+  applyEntityRenamed,
+} from './utils/projectEntitySync'
 
 export const activeDocSyncs = new Map<string, OverleafDocSync>()
 
@@ -106,12 +112,11 @@ export default function App() {
       if (sync) sync.replaceContent(data.content, data.baseContent)
     })
 
-    // Listen for new docs created locally (e.g. by Claude Code)
-    const unsubNewDoc = window.api.onSyncNewDoc((data) => {
-      if (data.docId) {
-        useAppStore.getState().addDocPath(data.docId, data.relPath)
-      }
-    })
+    // Keep the file tree in sync with Overleaf project-entity socket events.
+    const unsubEntityCreated = window.api.onSyncEntityCreated(applyEntityCreated)
+    const unsubEntityRemoved = window.api.onSyncEntityRemoved(applyEntityRemoved)
+    const unsubEntityRenamed = window.api.onSyncEntityRenamed(applyEntityRenamed)
+    const unsubEntityMoved = window.api.onSyncEntityMoved(applyEntityMoved)
 
     // Listen for initial comment data (threads + contexts) from background fetch on connect
     const unsubInitThreads = window.api.onCommentsInitThreads?.((data) => {
@@ -202,7 +207,10 @@ export default function App() {
       unsubState()
       unsubRejoined()
       unsubExternalEdit()
-      unsubNewDoc()
+      unsubEntityCreated()
+      unsubEntityRemoved()
+      unsubEntityRenamed()
+      unsubEntityMoved()
       unsubInitThreads?.()
       unsubInitContexts?.()
       unsubCommentsEvent?.()

@@ -47,25 +47,14 @@ export function changeSetToOtOps(changes: ChangeSet, oldDoc: Text): OtOp[] {
  */
 export function otOpsToChangeSpec(ops: OtOp[]): ChangeSpec[] {
   const specs: ChangeSpec[] = []
-  // Sort ops by position (process in order). Inserts before deletes at same position.
-  const sorted = [...ops].filter(op => isInsert(op) || isDelete(op)).sort((a, b) => {
-    if (a.p !== b.p) return a.p - b.p
-    // Inserts before deletes at same position
-    if (isInsert(a) && isDelete(b)) return -1
-    if (isDelete(a) && isInsert(b)) return 1
-    return 0
-  })
 
-  // We need to adjust positions as we apply ops sequentially
-  let posShift = 0
-
-  for (const op of sorted) {
+  // Overleaf/ShareJS text ops are sequential: every component position is
+  // relative to the document after previous components in the same op.
+  for (const op of ops) {
     if (isInsert(op)) {
-      specs.push({ from: op.p + posShift, insert: op.i })
-      posShift += op.i.length
+      specs.push({ from: op.p, insert: op.i })
     } else if (isDelete(op)) {
-      specs.push({ from: op.p + posShift, to: op.p + posShift + op.d.length })
-      posShift -= op.d.length
+      specs.push({ from: op.p, to: op.p + op.d.length })
     }
   }
 

@@ -85,13 +85,15 @@ export class OverleafDocSync {
     const specs = otOpsToChangeSpec(ops)
     if (specs.length === 0) return
 
-    this.view.dispatch({
-      changes: specs,
-      annotations: [
-        remoteUpdateAnnotation.of(true),
-        Transaction.addToHistory.of(false)
-      ]
-    })
+    for (const changes of specs) {
+      this.view.dispatch({
+        changes,
+        annotations: [
+          remoteUpdateAnnotation.of(true),
+          Transaction.addToHistory.of(false)
+        ]
+      })
+    }
   }
 
   /** Called when server acknowledges our ops */
@@ -126,32 +128,21 @@ export class OverleafDocSync {
   }
 
   /** Replace entire editor content with new content (external edit from disk).
-   *  If baseContent is provided, does a three-way merge to preserve concurrent
-   *  remote changes that arrived while the disk edit was being debounced. */
-  replaceContent(newContent: string, baseContent?: string) {
+   *  Computes a minimal diff from the current editor state to the new content
+   *  and dispatches it as a local transaction (which the OT extension picks up). */
+  replaceContent(newContent: string, _baseContent?: string) {
     if (!this.view) return
 
     const currentContent = this.view.state.doc.toString()
     if (currentContent === newContent) return
 
+    // Direct two-way diff: always diff current editor state → new disk content.
+    // We intentionally do NOT three-way merge with baseContent because the bridge's
+    // lastKnownContent (used as baseContent) races with onEditorContentChanged and
+    // frequently doesn't match the editor's actual state, causing patch_apply to
+    // produce garbled text when it "succeeds" via fuzzy matching.
     const dmp = new diff_match_patch()
-    let targetContent = newContent
-
-    // Three-way merge: if editor has diverged from the base (due to remote edits),
-    // apply only the disk changes (base→new) as patches on top of current editor state
-    if (baseContent !== undefined && currentContent !== baseContent) {
-      const patches = dmp.patch_make(baseContent, newContent)
-      const [merged, results] = dmp.patch_apply(patches, currentContent)
-      if (results.length > 0 && results.every(r => r)) {
-        targetContent = merged
-      }
-      // If patch failed, fall through to two-way diff (full replacement)
-    }
-
-    if (currentContent === targetContent) return
-
-    // Use diff to compute minimal changes so comment range positions remap correctly
-    const diffs = dmp.diff_main(currentContent, targetContent)
+    const diffs = dmp.diff_main(currentContent, newContent)
     dmp.diff_cleanupEfficiency(diffs)
 
     const changes: ChangeSpec[] = []
