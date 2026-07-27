@@ -864,9 +864,13 @@ ipcMain.handle('ot:connect', async (_e, projectId: string) => {
     // Relay collaborator cursor updates to renderer + track for MCP
     overleafSock.on('serverEvent', (name: string, args: unknown[]) => {
       if (name === 'clientTracking.clientUpdated') {
-        sendToRenderer('cursor:remoteUpdate', args[0])
-        // Track online user for MCP
         const u = args[0] as { id: string; user_id?: string; name?: string; email?: string }
+        // Skip our own echo — the native caret already marks our position;
+        // colored overlay cursors are for collaborators only (web behavior)
+        if (!u.id || u.id !== overleafSock?.publicId) {
+          sendToRenderer('cursor:remoteUpdate', args[0])
+        }
+        // Track online user for MCP (includes ourselves)
         if (u.id) {
           mcpOnlineUsers.set(u.id, { name: u.name || u.email?.split('@')[0] || 'User', email: u.email })
           writeMcpOnlineUsers()
@@ -928,8 +932,9 @@ ipcMain.handle('ot:connect', async (_e, projectId: string) => {
     // Write .mcp.json so Claude Code auto-discovers the MCP server
     // Dev: use source file. Packaged: copy bundled server into the project
     // temp dir so .mcp.json never contains a stale App Translocation path.
+    let mcpServerPath = ''
     try {
-      const mcpServerPath = await prepareMcpServerPath(tmpDir)
+      mcpServerPath = await prepareMcpServerPath(tmpDir)
       await writeFile(join(tmpDir, '.mcp.json'), JSON.stringify({
         mcpServers: {
           lattex: {
@@ -964,7 +969,11 @@ ipcMain.handle('ot:connect', async (_e, projectId: string) => {
     } catch { /* non-fatal */ }
     const ownerName = [projectResult.project.owner.first_name, projectResult.project.owner.last_name].filter(Boolean).join(' ')
 
-    await writeFile(join(tmpDir, '.claude', 'CLAUDE.md'), `# ${projectResult.project.name} — Overleaf Project
+    // One guide, two consumers: .claude/CLAUDE.md (Claude Code's native
+    // location) and AGENTS.md at the project root (the cross-tool standard
+    // read by Codex, Cursor, Gemini CLI, etc.). AGENTS.md is excluded from
+    // Overleaf sync alongside CLAUDE.md/.mcp.json.
+    const agentGuide = `# ${projectResult.project.name} — Overleaf Project
 
 > **IMPORTANT — MANDATORY FIRST STEPS (do this EVERY conversation before ANY edits):**
 >
@@ -1054,7 +1063,21 @@ The \`claude-workspace/\` directory is your private scratch space. It is **not s
 - **Scripts** — helper scripts for data processing, bibliography management, etc.
 
 **Important**: Always ask the user before running experiments or creating files in \`claude-workspace/\`. This directory persists across sessions for the same project.
-`)
+
+## Agent Setup (MCP)
+
+The tools above come from LatteX's MCP server (standard stdio MCP — works with any MCP-capable agent):
+
+- **Claude Code**: auto-configured. \`.mcp.json\` in this directory registers the \`lattex\` server and \`.claude/settings.json\` pre-approves its tools. Just run \`claude\`.
+- **Codex CLI**: register the server once for this project:
+  \`\`\`
+  codex mcp add lattex -- node "${mcpServerPath}"
+  \`\`\`
+  The path is project-specific — re-run this when switching projects. Approve \`lattex\` tool calls when Codex prompts.
+- **Any other MCP client**: stdio transport, command \`node "${mcpServerPath}"\`.
+`
+    await writeFile(join(tmpDir, '.claude', 'CLAUDE.md'), agentGuide)
+    await writeFile(join(tmpDir, 'AGENTS.md'), agentGuide)
     await writeFile(join(tmpDir, '.claude', 'settings.json'), JSON.stringify({
         permissions: {
           allow: [
@@ -1280,7 +1303,7 @@ ipcMain.handle('cursor:getConnectedUsers', async () => {
   if (!overleafSock) return []
   try {
     const users = await overleafSock.getConnectedUsers()
-    // Seed MCP online users map
+    // Seed MCP online users map (includes ourselves)
     mcpOnlineUsers.clear()
     for (const raw of users) {
       const u = raw as { client_id?: string; first_name?: string; last_name?: string; email?: string }
@@ -1290,7 +1313,11 @@ ipcMain.handle('cursor:getConnectedUsers', async () => {
       }
     }
     writeMcpOnlineUsers()
-    return users
+    // Exclude our own client — no colored overlay cursor for ourselves
+    return users.filter((raw) => {
+      const u = raw as { client_id?: string }
+      return !u.client_id || u.client_id !== overleafSock?.publicId
+    })
   } catch (e) {
     console.log('[cursor:getConnectedUsers] error:', e)
     return []

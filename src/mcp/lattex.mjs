@@ -3,8 +3,9 @@
 // Licensed under AGPL-3.0 - see LICENSE file
 
 // MCP Server: LatteX
-// Provides tools for Claude Code to interact with the Overleaf project:
-// comments, chat, file listing, compilation + debugging
+// Provides tools for coding agents (Claude Code, Codex, any MCP client) to
+// interact with the Overleaf project: comments, chat, file listing,
+// compilation + debugging
 
 import { Server } from '@modelcontextprotocol/sdk/server/index.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
@@ -13,14 +14,34 @@ import {
   ListToolsRequestSchema
 } from '@modelcontextprotocol/sdk/types.js'
 import { readFileSync, readdirSync, statSync, writeFileSync, existsSync, unlinkSync } from 'fs'
-import { join, relative } from 'path'
+import { join, relative, dirname } from 'path'
+import { fileURLToPath } from 'url'
 import https from 'https'
+
+// ── Project directory resolution ──────────────────────────────
+//
+// Claude Code launches MCP servers with the project as cwd, but other MCP
+// clients (Codex reads global config) may not. The packaged server is copied
+// into <project>/.lattex/lattex-mcp.mjs, so the script's own location also
+// identifies the project. Resolution order: cwd, then script parent dir.
+
+function resolveProjectDir() {
+  const cwd = process.cwd()
+  if (existsSync(join(cwd, '.lattex-mcp.json'))) return cwd
+  try {
+    const scriptDir = dirname(fileURLToPath(import.meta.url))
+    const candidate = dirname(scriptDir) // <project>/.lattex/.. = <project>
+    if (existsSync(join(candidate, '.lattex-mcp.json'))) return candidate
+  } catch { /* fall through */ }
+  return cwd
+}
+
+const PROJECT_DIR = resolveProjectDir()
 
 // ── State ──────────────────────────────────────────────────────
 
 function readState() {
-  const cwd = process.cwd()
-  const statePath = join(cwd, '.lattex-mcp.json')
+  const statePath = join(PROJECT_DIR, '.lattex-mcp.json')
   try {
     return JSON.parse(readFileSync(statePath, 'utf-8'))
   } catch {
@@ -847,7 +868,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       // ── Project ───────────────────────────────────
 
       case 'list_project_files': {
-        const cwd = process.cwd()
+        const cwd = PROJECT_DIR
         const files = walkDir(cwd, cwd)
           .filter(f => !f.path.startsWith('.'))
 
@@ -870,7 +891,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case 'compile_latex': {
         const mainFile = args?.main_file || null
-        const cwd = process.cwd()
+        const cwd = PROJECT_DIR
         const requestPath = join(cwd, '.lattex-compile-request')
         const resultPath = join(cwd, '.lattex-compile-result')
 
@@ -1015,7 +1036,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'get_online_users': {
-        const cwd = process.cwd()
+        const cwd = PROJECT_DIR
         const usersPath = join(cwd, '.lattex-online-users.json')
         try {
           const users = JSON.parse(readFileSync(usersPath, 'utf-8'))
@@ -1032,7 +1053,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       // ── PDF ──────────────────────────────────────────
 
       case 'read_compiled_pdf': {
-        const cwd = process.cwd()
+        const cwd = PROJECT_DIR
         const pdfPath = join(cwd, '.build', 'output.pdf')
         try {
           statSync(pdfPath)

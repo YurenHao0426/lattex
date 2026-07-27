@@ -207,7 +207,7 @@ export class FileSyncBridge {
       ignored: [
         /(^|[/\\])\../, // dotfiles (also covers .build/ and .claude/)
         JUNK_EXT_RE, // pure build noise (aux/log/synctex/…) — never project content
-        /(?:^|[/\\])(?:CLAUDE\.md|\.mcp\.json)$/, // App-generated config files
+        /(?:^|[/\\])(?:CLAUDE\.md|AGENTS\.md|\.mcp\.json)$/, // App-generated config files
         /(?:^|[/\\])(?:claude-workspace|__MACOSX)(?:[/\\]|$)/ // scratch space + zip junk
       ]
     })
@@ -752,7 +752,7 @@ export class FileSyncBridge {
 
     // Skip app-generated config files and scratch space that should not be synced
     const basename = relPath.split('/').pop() || relPath
-    if (basename === 'CLAUDE.md' || basename === '.mcp.json') return
+    if (basename === 'CLAUDE.md' || basename === 'AGENTS.md' || basename === '.mcp.json') return
     if (relPath.startsWith('claude-workspace/') || relPath === 'claude-workspace') return
 
     // Layer 1: Skip if bridge is currently writing this file
@@ -1412,7 +1412,7 @@ export class FileSyncBridge {
       // Skip LaTeX build artifacts, dotfiles, app config files, and scratch space
       if (this.isCompileArtifact(relPath)) continue
       if (/(^|[/\\])\./.test(relPath)) continue
-      if (/(?:^|[/\\])(?:CLAUDE\.md|\.mcp\.json)$/.test(relPath)) continue
+      if (/(?:^|[/\\])(?:CLAUDE\.md|AGENTS\.md|\.mcp\.json)$/.test(relPath)) continue
       if (relPath.startsWith('claude-workspace/') || relPath === 'claude-workspace') continue
 
       bridgeLog(`[FileSyncBridge] orphaned file found: ${relPath}`)
@@ -1433,7 +1433,7 @@ export class FileSyncBridge {
     // Skip LaTeX build artifacts, dotfiles, app config files, and scratch space
     if (this.isCompileArtifact(relPath)) return
     if (/(^|[/\\])\./.test(relPath)) return
-    if (/(?:^|[/\\])(?:CLAUDE\.md|\.mcp\.json)$/.test(relPath)) return
+    if (/(?:^|[/\\])(?:CLAUDE\.md|AGENTS\.md|\.mcp\.json)$/.test(relPath)) return
     if (relPath.startsWith('claude-workspace/') || relPath === 'claude-workspace') return
 
     // Debounce 1s to let the tool finish writing

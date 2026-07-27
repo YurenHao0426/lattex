@@ -66,6 +66,37 @@ function TerminalInstance({ id, cwd, cmd, args, visible }: {
     xterm.loadAddon(fitAddon)
     xterm.open(termRef.current)
 
+    // ── IME double-input workaround ─────────────────────────────
+    //
+    // Switching the input source mid-composition (e.g. CapsLock with a
+    // Chinese IME, committing the raw pinyin as ASCII) makes xterm send the
+    // text twice: its CompositionHelper.keydown() finalizes and sends
+    // synchronously, then the browser's compositionend fires and the helper
+    // sends the same textarea content again. Intercept in the capture phase
+    // on the container (runs before xterm's textarea listeners): when a
+    // non-IME keydown just force-finalized a composition, swallow the
+    // compositionend that follows so the text is only sent once.
+    const container = termRef.current
+    let imeComposing = false
+    let keydownFinalizedAt = 0
+    const onCompStart = () => { imeComposing = true }
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (imeComposing && e.keyCode !== 229 && e.keyCode !== 16 && e.keyCode !== 17 && e.keyCode !== 18) {
+        // xterm's CompositionHelper will finalize + send synchronously now
+        keydownFinalizedAt = Date.now()
+        imeComposing = false
+      }
+    }
+    const onCompEnd = (e: Event) => {
+      imeComposing = false
+      if (Date.now() - keydownFinalizedAt < 100) {
+        e.stopPropagation() // duplicate commit of already-sent text
+      }
+    }
+    container.addEventListener('compositionstart', onCompStart, true)
+    container.addEventListener('keydown', onKeyDown, true)
+    container.addEventListener('compositionend', onCompEnd, true)
+
     setTimeout(() => fitAddon.fit(), 100)
 
     xtermRef.current = xterm
@@ -101,6 +132,9 @@ function TerminalInstance({ id, cwd, cmd, args, visible }: {
     return () => {
       initializedRef.current = false
       resizeObserver.disconnect()
+      container.removeEventListener('compositionstart', onCompStart, true)
+      container.removeEventListener('keydown', onKeyDown, true)
+      container.removeEventListener('compositionend', onCompEnd, true)
       unsubData()
       unsubExit()
       window.api.ptyKill(id)
