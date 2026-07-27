@@ -1140,8 +1140,16 @@ html, body, #root {
   min-width: 0;
   display: flex;
   flex-direction: column;
-  padding: 0 24px 24px;
+  padding: 0 24px;
+  overflow: hidden;
+}
+
+/* Scrollable table region — header/search/bulk tools above stay in view */
+.pl-scroll {
+  flex: 1;
+  min-height: 0;
   overflow-y: auto;
+  padding-bottom: 24px;
 }
 
 .pl-main-header {
@@ -1173,6 +1181,28 @@ html, body, #root {
 
 .pl-tags-dropdown-wrap {
   position: relative;
+}
+
+/* Per-row tag menu anchor */
+.pl-row-tag-wrap {
+  position: relative;
+  display: inline-flex;
+}
+.pl-row-tag-wrap.open .pl-icon-btn {
+  opacity: 1;
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+.pl-row-tag-wrap .pl-dropdown {
+  min-width: 200px;
+  max-height: 320px;
+  overflow-y: auto;
+}
+
+/* Dropdown that opens upward (rows near the bottom of the window) */
+.pl-dropdown-up {
+  top: auto;
+  bottom: calc(100% + 4px);
 }
 
 .pl-icon-btn {
@@ -1237,6 +1267,10 @@ html, body, #root {
   border-bottom: 1px solid var(--border);
   user-select: none;
   gap: 10px;
+  position: sticky;
+  top: 0;
+  background: var(--bg-primary);
+  z-index: 5;
 }
 .pl-sortable {
   cursor: pointer;

@@ -125,6 +125,7 @@ export default function ProjectList({ onOpenProject }: Props) {
   const [tagsMenuOpen, setTagsMenuOpen] = useState(false)
   const [newMenuOpen, setNewMenuOpen] = useState(false)
   const [tagKebabOpen, setTagKebabOpen] = useState<string | null>(null)
+  const [rowTagMenu, setRowTagMenu] = useState<{ projectId: string; up: boolean } | null>(null)
   const [apiKeys, setApiKeys] = useState<Record<string, string>>({})
   const [apiKeysVisible, setApiKeysVisible] = useState<Record<string, boolean>>({})
   const { setStatusMessage } = useAppStore()
@@ -151,7 +152,12 @@ export default function ProjectList({ onOpenProject }: Props) {
 
   // Close dropdowns on outside click
   useEffect(() => {
-    const close = () => { setTagsMenuOpen(false); setNewMenuOpen(false); setTagKebabOpen(null) }
+    const close = () => {
+      setTagsMenuOpen(false)
+      setNewMenuOpen(false)
+      setTagKebabOpen(null)
+      setRowTagMenu(null)
+    }
     window.addEventListener('click', close)
     return () => window.removeEventListener('click', close)
   }, [])
@@ -359,8 +365,8 @@ export default function ProjectList({ onOpenProject }: Props) {
     ))
   }
 
-  const toggleTagForSelected = async (tag: Tag) => {
-    const ids = selectedProjects.map((p) => p.id)
+  /** Toggle tag membership: if every project has the tag, remove it; else add to the missing ones */
+  const toggleTagForProjects = async (tag: Tag, ids: string[]) => {
     const allContained = ids.every((id) => tag.project_ids?.includes(id))
     if (allContained) {
       removeProjectsFromTagInView(tag._id, ids)
@@ -614,9 +620,55 @@ export default function ProjectList({ onOpenProject }: Props) {
     </button>
   )
 
+  /** Tag checklist dropdown, shared by the toolbar bulk action and per-row menus */
+  const tagToggleDropdown = (projectIds: string[], onClose: () => void, extraClass = '') => (
+    <div className={`pl-dropdown pl-dropdown-right ${extraClass}`}>
+      <div className="pl-dropdown-header">Add to tag</div>
+      {sortedTags.map((tag) => {
+        const allIn = projectIds.every((id) => tag.project_ids?.includes(id))
+        return (
+          <button key={tag._id} className="pl-dropdown-item" onClick={() => toggleTagForProjects(tag, projectIds)}>
+            <span className="pl-tag-dot" style={{ backgroundColor: getTagColor(tag) }} />
+            <span className="pl-dropdown-label">{tag.name}</span>
+            {allIn && <Icon d={ICONS.check} size={13} />}
+          </button>
+        )
+      })}
+      {sortedTags.length > 0 && <hr className="pl-dropdown-divider" />}
+      <button
+        className="pl-dropdown-item"
+        onClick={() => {
+          onClose()
+          openModal({ kind: 'createTag', forProjects: projectIds })
+        }}
+      >
+        <Icon d={ICONS.plus} size={13} /> Create new tag
+      </button>
+    </div>
+  )
+
   const rowActions = (p: OverleafProject) => {
     const isOwner = p.accessLevel === 'owner'
     const buttons: JSX.Element[] = []
+    if (!p.archived && !p.trashed) {
+      const menuOpen = rowTagMenu?.projectId === p.id
+      buttons.push(
+        <div key="tags" className={`pl-row-tag-wrap ${menuOpen ? 'open' : ''}`} onClick={(e) => e.stopPropagation()}>
+          <button
+            className="pl-icon-btn"
+            title="Add to tag"
+            onClick={(e) => {
+              // Open upward when the row sits in the lower part of the window
+              const up = e.currentTarget.getBoundingClientRect().top > window.innerHeight * 0.55
+              setRowTagMenu(menuOpen ? null : { projectId: p.id, up })
+            }}
+          >
+            <Icon d={ICONS.tag} />
+          </button>
+          {menuOpen && tagToggleDropdown([p.id], () => setRowTagMenu(null), rowTagMenu?.up ? 'pl-dropdown-up' : '')}
+        </div>
+      )
+    }
     if (!p.archived && !p.trashed) buttons.push(iconBtn('Copy', 'copy', () => openModal({ kind: 'clone', project: p })))
     buttons.push(iconBtn('Download .zip file', 'download', () => handleDownload([p])))
     if (!p.archived) buttons.push(iconBtn('Archive', 'archive', () => openModal({ kind: 'confirm', action: 'archive', projects: [p] })))
@@ -797,31 +849,8 @@ export default function ProjectList({ onOpenProject }: Props) {
                           <button className="pl-icon-btn" title="Add to tag" onClick={() => setTagsMenuOpen((v) => !v)}>
                             <Icon d={ICONS.tag} />
                           </button>
-                          {tagsMenuOpen && (
-                            <div className="pl-dropdown pl-dropdown-right">
-                              <div className="pl-dropdown-header">Add to tag</div>
-                              {sortedTags.map((tag) => {
-                                const allIn = selectedProjects.every((p) => tag.project_ids?.includes(p.id))
-                                return (
-                                  <button key={tag._id} className="pl-dropdown-item" onClick={() => toggleTagForSelected(tag)}>
-                                    <span className="pl-tag-dot" style={{ backgroundColor: getTagColor(tag) }} />
-                                    <span className="pl-dropdown-label">{tag.name}</span>
-                                    {allIn && <Icon d={ICONS.check} size={13} />}
-                                  </button>
-                                )
-                              })}
-                              {sortedTags.length > 0 && <hr className="pl-dropdown-divider" />}
-                              <button
-                                className="pl-dropdown-item"
-                                onClick={() => {
-                                  setTagsMenuOpen(false)
-                                  openModal({ kind: 'createTag', forProjects: selectedProjects.map((p) => p.id) })
-                                }}
-                              >
-                                <Icon d={ICONS.plus} size={13} /> Create new tag
-                              </button>
-                            </div>
-                          )}
+                          {tagsMenuOpen &&
+                            tagToggleDropdown(selectedProjects.map((p) => p.id), () => setTagsMenuOpen(false))}
                         </div>
                       )}
                     </div>
@@ -851,6 +880,7 @@ export default function ProjectList({ onOpenProject }: Props) {
                 )}
               </div>
 
+              <div className="pl-scroll">
               <div className="pl-table">
                 <div className="pl-table-header">
                   <span className="pl-col-check">
@@ -939,6 +969,7 @@ export default function ProjectList({ onOpenProject }: Props) {
                   </span>
                 </div>
               )}
+              </div>
             </>
           )}
         </main>
