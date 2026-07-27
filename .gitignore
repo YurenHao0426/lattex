@@ -7,3 +7,6 @@ dist/
 *.AppImage
 .DS_Store
 reference/
+*.tsbuildinfo
+electron.vite.config.js
+electron.vite.config.d.ts

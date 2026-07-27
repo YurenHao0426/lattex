@@ -6,7 +6,7 @@ import { EditorView, keymap, lineNumbers, highlightActiveLine, highlightActiveLi
 import { EditorState } from '@codemirror/state'
 import { defaultKeymap, history, historyKeymap, indentWithTab } from '@codemirror/commands'
 import { bracketMatching, foldGutter, indentOnInput, StreamLanguage, syntaxHighlighting, HighlightStyle } from '@codemirror/language'
-import { closeBrackets, closeBracketsKeymap, completionKeymap } from '@codemirror/autocomplete'
+import { closeBrackets, closeBracketsKeymap } from '@codemirror/autocomplete'
 import { search, searchKeymap, highlightSelectionMatches } from '@codemirror/search'
 import { stex } from '@codemirror/legacy-modes/mode/stex'
 import { tags } from '@lezer/highlight'
@@ -243,11 +243,13 @@ export default function Editor() {
         search({ top: true }),
         StreamLanguage.define(stex),
         syntaxHighlighting(cosmicLatteHighlight),
+        // Completion keys (Enter/Tab/arrows) are bound at Prec.highest inside
+        // latexAutocomplete(), mirroring Overleaf's keymap setup — they must
+        // win over defaultKeymap's Enter/arrow bindings while the popup is open.
         keymap.of([
+          ...closeBracketsKeymap,
           ...defaultKeymap,
           ...historyKeymap,
-          ...closeBracketsKeymap,
-          ...completionKeymap,
           ...searchKeymap,
           indentWithTab
         ]),

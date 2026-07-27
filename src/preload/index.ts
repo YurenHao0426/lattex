@@ -19,7 +19,7 @@ const api = {
   onCompileLog: (cb: (log: string) => void) => {
     const handler = (_e: Electron.IpcRendererEvent, log: string) => cb(log)
     ipcRenderer.on('latex:log', handler)
-    return () => ipcRenderer.removeListener('latex:log', handler)
+    return () => { ipcRenderer.removeListener('latex:log', handler) }
   },
 
   // Terminal (supports multiple named instances)
@@ -30,12 +30,12 @@ const api = {
   onPtyData: (id: string, cb: (data: string) => void) => {
     const handler = (_e: Electron.IpcRendererEvent, data: string) => cb(data)
     ipcRenderer.on(`pty:data:${id}`, handler)
-    return () => ipcRenderer.removeListener(`pty:data:${id}`, handler)
+    return () => { ipcRenderer.removeListener(`pty:data:${id}`, handler) }
   },
   onPtyExit: (id: string, cb: () => void) => {
     const handler = () => cb()
     ipcRenderer.on(`pty:exit:${id}`, handler)
-    return () => ipcRenderer.removeListener(`pty:exit:${id}`, handler)
+    return () => { ipcRenderer.removeListener(`pty:exit:${id}`, handler) }
   },
 
   // SyncTeX
@@ -103,22 +103,22 @@ const api = {
   onOtRemoteOp: (cb: (data: { docId: string; ops: unknown[]; version: number }) => void) => {
     const handler = (_e: Electron.IpcRendererEvent, data: { docId: string; ops: unknown[]; version: number }) => cb(data)
     ipcRenderer.on('ot:remoteOp', handler)
-    return () => ipcRenderer.removeListener('ot:remoteOp', handler)
+    return () => { ipcRenderer.removeListener('ot:remoteOp', handler) }
   },
   onOtAck: (cb: (data: { docId: string }) => void) => {
     const handler = (_e: Electron.IpcRendererEvent, data: { docId: string }) => cb(data)
     ipcRenderer.on('ot:ack', handler)
-    return () => ipcRenderer.removeListener('ot:ack', handler)
+    return () => { ipcRenderer.removeListener('ot:ack', handler) }
   },
   onOtConnectionState: (cb: (state: string) => void) => {
     const handler = (_e: Electron.IpcRendererEvent, state: string) => cb(state)
     ipcRenderer.on('ot:connectionState', handler)
-    return () => ipcRenderer.removeListener('ot:connectionState', handler)
+    return () => { ipcRenderer.removeListener('ot:connectionState', handler) }
   },
   onOtDocRejoined: (cb: (data: { docId: string; content: string; version: number }) => void) => {
     const handler = (_e: Electron.IpcRendererEvent, data: { docId: string; content: string; version: number }) => cb(data)
     ipcRenderer.on('ot:docRejoined', handler)
-    return () => ipcRenderer.removeListener('ot:docRejoined', handler)
+    return () => { ipcRenderer.removeListener('ot:docRejoined', handler) }
   },
   overleafListProjects: () =>
     ipcRenderer.invoke('overleaf:listProjects') as Promise<{
@@ -128,6 +128,7 @@ const api = {
         owner?: { firstName: string; lastName: string; email?: string }
         lastUpdatedBy?: { firstName: string; lastName: string } | null
         accessLevel?: string; source?: string
+        archived?: boolean; trashed?: boolean
       }>
       message?: string
     }>,
@@ -138,6 +139,40 @@ const api = {
   overleafUploadProject: () =>
     ipcRenderer.invoke('overleaf:uploadProject') as Promise<{
       success: boolean; projectId?: string; message?: string
+    }>,
+
+  // Project dashboard operations (official Overleaf endpoints)
+  overleafGetTags: () =>
+    ipcRenderer.invoke('overleaf:getTags') as Promise<{
+      success: boolean
+      tags?: Array<{ _id: string; name: string; color?: string | null; project_ids?: string[] }>
+      message?: string
+    }>,
+  overleafCreateTag: (name: string, color?: string) =>
+    ipcRenderer.invoke('overleaf:createTag', name, color) as Promise<{
+      success: boolean
+      tag?: { _id: string; name: string; color?: string | null; project_ids?: string[] }
+      message?: string
+    }>,
+  overleafEditTag: (tagId: string, name: string, color?: string) =>
+    ipcRenderer.invoke('overleaf:editTag', tagId, name, color) as Promise<{ success: boolean; message?: string }>,
+  overleafDeleteTag: (tagId: string) =>
+    ipcRenderer.invoke('overleaf:deleteTag', tagId) as Promise<{ success: boolean; message?: string }>,
+  overleafAddProjectsToTag: (tagId: string, projectIds: string[]) =>
+    ipcRenderer.invoke('overleaf:addProjectsToTag', tagId, projectIds) as Promise<{ success: boolean; message?: string }>,
+  overleafRemoveProjectsFromTag: (tagId: string, projectIds: string[]) =>
+    ipcRenderer.invoke('overleaf:removeProjectsFromTag', tagId, projectIds) as Promise<{ success: boolean; message?: string }>,
+  overleafSetProjectState: (projectId: string, action: 'archive' | 'unarchive' | 'trash' | 'untrash' | 'delete' | 'leave') =>
+    ipcRenderer.invoke('overleaf:setProjectState', projectId, action) as Promise<{ success: boolean; message?: string }>,
+  overleafRenameProject: (projectId: string, newName: string) =>
+    ipcRenderer.invoke('overleaf:renameProject', projectId, newName) as Promise<{ success: boolean; message?: string }>,
+  overleafCloneProject: (projectId: string, projectName: string, tags?: string[]) =>
+    ipcRenderer.invoke('overleaf:cloneProject', projectId, projectName, tags) as Promise<{
+      success: boolean; projectId?: string; message?: string
+    }>,
+  overleafDownloadProjectZip: (projectIds: string[], suggestedName: string) =>
+    ipcRenderer.invoke('overleaf:downloadProjectZip', projectIds, suggestedName) as Promise<{
+      success: boolean; path?: string; message?: string
     }>,
   overleafSocketCompile: (mainTexRelPath: string) =>
     ipcRenderer.invoke('overleaf:socketCompile', mainTexRelPath) as Promise<{
@@ -164,26 +199,51 @@ const api = {
   onSyncExternalEdit: (cb: (data: { docId: string; content: string; baseContent?: string }) => void) => {
     const handler = (_e: Electron.IpcRendererEvent, data: { docId: string; content: string; baseContent?: string }) => cb(data)
     ipcRenderer.on('sync:externalEdit', handler)
-    return () => ipcRenderer.removeListener('sync:externalEdit', handler)
+    return () => { ipcRenderer.removeListener('sync:externalEdit', handler) }
   },
   syncContentChanged: (docId: string, content: string) =>
     ipcRenderer.invoke('sync:contentChanged', docId, content),
+  syncGetAllDocContents: () =>
+    ipcRenderer.invoke('sync:getAllDocContents') as Promise<Array<{ path: string; content: string }>>,
+  onSyncFileStatus: (cb: (data: { relPath: string; status: 'retrying' | 'synced' | 'failed'; attempts?: number }) => void) => {
+    const handler = (_e: Electron.IpcRendererEvent, data: { relPath: string; status: 'retrying' | 'synced' | 'failed'; attempts?: number }) => cb(data)
+    ipcRenderer.on('sync:fileStatus', handler)
+    return () => { ipcRenderer.removeListener('sync:fileStatus', handler) }
+  },
+  onAuthSessionExpired: (cb: () => void) => {
+    const handler = () => cb()
+    ipcRenderer.on('auth:sessionExpired', handler)
+    return () => { ipcRenderer.removeListener('auth:sessionExpired', handler) }
+  },
+  overleafGetMetadata: (projectId: string) =>
+    ipcRenderer.invoke('overleaf:getMetadata', projectId) as Promise<{
+      success: boolean
+      data?: {
+        projectId: string
+        projectMeta: Record<string, {
+          labels: string[]
+          packages: Record<string, Array<{ caption: string; snippet: string; meta: string; score: number }>>
+          packageNames: string[]
+        }>
+      }
+      message?: string
+    }>,
 
   // MCP compile events (Claude Code triggers compile via file signal)
   onMcpCompileStarted: (cb: () => void) => {
     const handler = () => cb()
     ipcRenderer.on('compile:mcpStarted', handler)
-    return () => ipcRenderer.removeListener('compile:mcpStarted', handler)
+    return () => { ipcRenderer.removeListener('compile:mcpStarted', handler) }
   },
   onMcpCompileFinished: (cb: (data: { success: boolean; pdfPath: string }) => void) => {
     const handler = (_e: Electron.IpcRendererEvent, data: { success: boolean; pdfPath: string }) => cb(data)
     ipcRenderer.on('compile:mcpFinished', handler)
-    return () => ipcRenderer.removeListener('compile:mcpFinished', handler)
+    return () => { ipcRenderer.removeListener('compile:mcpFinished', handler) }
   },
   onSyncNewDoc: (cb: (data: { docId: string | null; relPath: string }) => void) => {
     const handler = (_e: Electron.IpcRendererEvent, data: { docId: string | null; relPath: string }) => cb(data)
     ipcRenderer.on('sync:newDoc', handler)
-    return () => ipcRenderer.removeListener('sync:newDoc', handler)
+    return () => { ipcRenderer.removeListener('sync:newDoc', handler) }
   },
   onSyncEntityCreated: (cb: (data: {
     kind: 'doc' | 'file' | 'folder'
@@ -200,7 +260,7 @@ const api = {
       parentFolderId?: string
     }) => cb(data)
     ipcRenderer.on('sync:entityCreated', handler)
-    return () => ipcRenderer.removeListener('sync:entityCreated', handler)
+    return () => { ipcRenderer.removeListener('sync:entityCreated', handler) }
   },
   onSyncEntityRemoved: (cb: (data: {
     kind: 'doc' | 'file' | 'folder'
@@ -213,7 +273,7 @@ const api = {
       relPath: string
     }) => cb(data)
     ipcRenderer.on('sync:entityRemoved', handler)
-    return () => ipcRenderer.removeListener('sync:entityRemoved', handler)
+    return () => { ipcRenderer.removeListener('sync:entityRemoved', handler) }
   },
   onSyncEntityRenamed: (cb: (data: {
     kind: 'doc' | 'file' | 'folder'
@@ -230,7 +290,7 @@ const api = {
       newName: string
     }) => cb(data)
     ipcRenderer.on('sync:entityRenamed', handler)
-    return () => ipcRenderer.removeListener('sync:entityRenamed', handler)
+    return () => { ipcRenderer.removeListener('sync:entityRenamed', handler) }
   },
   onSyncEntityMoved: (cb: (data: {
     kind: 'doc' | 'file' | 'folder'
@@ -247,7 +307,7 @@ const api = {
       parentFolderId: string
     }) => cb(data)
     ipcRenderer.on('sync:entityMoved', handler)
-    return () => ipcRenderer.removeListener('sync:entityMoved', handler)
+    return () => { ipcRenderer.removeListener('sync:entityMoved', handler) }
   },
 
   // Cursor tracking
@@ -258,12 +318,12 @@ const api = {
   onCursorRemoteUpdate: (cb: (data: unknown) => void) => {
     const handler = (_e: Electron.IpcRendererEvent, data: unknown) => cb(data)
     ipcRenderer.on('cursor:remoteUpdate', handler)
-    return () => ipcRenderer.removeListener('cursor:remoteUpdate', handler)
+    return () => { ipcRenderer.removeListener('cursor:remoteUpdate', handler) }
   },
   onCursorRemoteDisconnected: (cb: (clientId: string) => void) => {
     const handler = (_e: Electron.IpcRendererEvent, clientId: string) => cb(clientId)
     ipcRenderer.on('cursor:remoteDisconnected', handler)
-    return () => ipcRenderer.removeListener('cursor:remoteDisconnected', handler)
+    return () => { ipcRenderer.removeListener('cursor:remoteDisconnected', handler) }
   },
 
   // Chat
@@ -274,24 +334,24 @@ const api = {
   onChatMessage: (cb: (msg: unknown) => void) => {
     const handler = (_e: Electron.IpcRendererEvent, msg: unknown) => cb(msg)
     ipcRenderer.on('chat:newMessage', handler)
-    return () => ipcRenderer.removeListener('chat:newMessage', handler)
+    return () => { ipcRenderer.removeListener('chat:newMessage', handler) }
   },
 
   // Comments real-time events
   onCommentsEvent: (cb: (event: { type: string; args: unknown[] }) => void) => {
     const handler = (_e: Electron.IpcRendererEvent, event: { type: string; args: unknown[] }) => cb(event)
     ipcRenderer.on('comments:event', handler)
-    return () => ipcRenderer.removeListener('comments:event', handler)
+    return () => { ipcRenderer.removeListener('comments:event', handler) }
   },
   onCommentsInitThreads: (cb: (data: { threads: Record<string, unknown>; resolvedIds: string[] }) => void) => {
     const handler = (_e: Electron.IpcRendererEvent, data: { threads: Record<string, unknown>; resolvedIds: string[] }) => cb(data)
     ipcRenderer.on('comments:initThreads', handler)
-    return () => ipcRenderer.removeListener('comments:initThreads', handler)
+    return () => { ipcRenderer.removeListener('comments:initThreads', handler) }
   },
   onCommentsInitContexts: (cb: (data: { contexts: Record<string, { file: string; text: string; pos: number }> }) => void) => {
     const handler = (_e: Electron.IpcRendererEvent, data: { contexts: Record<string, { file: string; text: string; pos: number }> }) => cb(data)
     ipcRenderer.on('comments:initContexts', handler)
-    return () => ipcRenderer.removeListener('comments:initContexts', handler)
+    return () => { ipcRenderer.removeListener('comments:initContexts', handler) }
   },
 
   // API Keys

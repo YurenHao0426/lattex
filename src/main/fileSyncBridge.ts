@@ -3,6 +3,7 @@
 
 // Bidirectional file sync bridge: temp dir ↔ Overleaf via OT (text) + REST (binary)
 import { join, dirname } from 'path'
+import { existsSync } from 'fs'
 import { readFile, writeFile, mkdir, unlink, rename as fsRename, appendFile, readdir, rm } from 'fs/promises'
 import { createHash } from 'crypto'
 import * as chokidar from 'chokidar'
@@ -16,25 +17,49 @@ import { isInsert, isDelete } from './otTypes'
 
 const dmp = new diff_match_patch()
 const LOG_FILE = '/tmp/lattex-bridge.log'
-function bridgeLog(msg: string) {
-  const line = `[${new Date().toISOString()}] ${msg}`
+function bridgeLog(msg: string, ...rest: unknown[]) {
+  const line = `[${new Date().toISOString()}] ${msg}${rest.length ? ' ' + rest.map(String).join(' ') : ''}`
   console.log(line)
   appendFile(LOG_FILE, line + '\n').catch(() => {})
 }
 
+// Official Overleaf text-extension list (creates a doc rather than a binary
+// file) — mirrors `textExtensions` in the Overleaf server's settings.defaults,
+// plus the extensions LatteX historically synced as editable docs (the server
+// supports extra text extensions via ADDITIONAL_TEXT_EXTENSIONS, and the
+// /doc endpoint accepts any name).
 const TEXT_EXTENSIONS = new Set([
-  'tex', 'bib', 'bst', 'cls', 'sty', 'dtx', 'ins', 'fd', 'def', 'cfg',
-  'lbx', 'cbx', 'bbx', 'clo', 'lco', 'tikz', 'txt', 'md', 'py', 'r',
-  'm', 'lua', 'sh', 'yml', 'yaml', 'json', 'xml', 'csv', 'tsv', 'html',
-  'css', 'js', 'ts', 'c', 'cpp', 'h', 'hpp', 'java', 'rb', 'pl', 'mk', 'bbl'
+  'tex', 'latex', 'sty', 'cls', 'bst', 'bib', 'bibtex', 'txt', 'tikz',
+  'mtx', 'rtex', 'md', 'asy', 'lbx', 'bbx', 'cbx', 'm', 'lco', 'dtx',
+  'ins', 'ist', 'def', 'clo', 'ldf', 'rmd', 'qmd', 'lua', 'py', 'gv',
+  'mf', 'yml', 'yaml', 'lhs', 'lean', 'lean4', 'hs', 'mk', 'xmpdata',
+  'cfg', 'rnw', 'ltx', 'inc',
+  'fd', 'r', 'sh', 'json', 'xml', 'csv', 'tsv', 'html', 'css', 'js',
+  'ts', 'c', 'cpp', 'h', 'hpp', 'java', 'rb', 'pl'
 ])
+
+// Official Overleaf `editableFilenames` (case-insensitive)
+const EDITABLE_FILENAMES = new Set(['latexmkrc', '.latexmkrc', 'makefile', 'gnumakefile'])
 
 function isTextExtension(relPath: string): boolean {
   const name = relPath.split('/').pop()?.toLowerCase() || ''
-  if (name === 'makefile' || name === 'latexmkrc') return true
+  if (EDITABLE_FILENAMES.has(name)) return true
   const ext = name.split('.').pop() || ''
   return TEXT_EXTENSIONS.has(ext)
 }
+
+// Two-tier build-artifact filtering (based on the server's fileIgnorePattern,
+// but only for extensions that are never legitimate project content):
+//
+// Tier 1 (JUNK_EXT_RE): pure build noise — never synced, chokidar ignores it.
+// Tier 2 (MAYBE_ARTIFACT_EXT_RE): extensions that CAN be real project files
+//   (figure/standalone PDFs, .docx supplements, .csv.gz datasets, arXiv .bbl).
+//   These sync unless there is concrete evidence of a local compile: the file
+//   is a tracked output of our own latexmk run, or a same-basename .aux/.log/
+//   .fls/.fdb_latexmk sits next to it. Known Overleaf entities always sync.
+const JUNK_EXT_RE = /\.(aux|log|lof|lot|fls|fdb_latexmk|synctex|synctex\(busy\)|synctex\.gz|out|toc|nav|snm|vrb|xdv|pdfxref|stderr|stdout|chktex|blg|ilg|idx|ind|nlo|glo|gls|glg|thm|spl|swp|pdfsync)$/i
+const MAYBE_ARTIFACT_EXT_RE = /\.(pdf|dvi|ps|bbl|gz|doc|docx)$/i
+const COMPILE_EVIDENCE_EXTS = ['.aux', '.log', '.fls', '.fdb_latexmk']
 
 export class FileSyncBridge {
   private lastKnownContent = new Map<string, string>()   // relPath → content (text docs)
@@ -44,8 +69,14 @@ export class FileSyncBridge {
   private otClients = new Map<string, OtClient>()         // docId → OtClient (non-editor docs)
   private editorDocs = new Set<string>()                  // docIds owned by renderer
   private pendingCreates = new Set<string>()              // relPaths being created on Overleaf
+  private pendingCreateExpiry = new Map<string, ReturnType<typeof setTimeout>>()
   private createdFolders = new Map<string, string>()      // dirPath → folderId cache
   private watcher: chokidar.FSWatcher | null = null
+  private rescanTimer: ReturnType<typeof setInterval> | null = null
+  private retryTimers = new Map<string, ReturnType<typeof setTimeout>>()  // relPath → retry timer
+  private retryAttempts = new Map<string, number>()       // relPath → attempt count
+  private permanentFailures = new Set<string>()           // relPaths that exhausted retries
+  private compileOutputs = new Set<string>()              // relPaths written by local compiles
 
   private socket: OverleafSocket
   private tmpDir: string
@@ -63,6 +94,7 @@ export class FileSyncBridge {
   private serverEventHandler: ((name: string, args: unknown[]) => void) | null = null
   private docRejoinedHandler: ((docId: string, result: { docLines: string[]; version: number }) => void) | null = null
   private stopped = false
+  private refreshAuth: (() => Promise<{ cookie: string; csrfToken: string } | null>) | null = null
 
   constructor(
     socket: OverleafSocket,
@@ -73,8 +105,10 @@ export class FileSyncBridge {
     mainWindow: BrowserWindow,
     projectId: string,
     cookie: string,
-    csrfToken: string
+    csrfToken: string,
+    refreshAuth?: () => Promise<{ cookie: string; csrfToken: string } | null>
   ) {
+    this.refreshAuth = refreshAuth || null
     this.socket = socket
     this.tmpDir = tmpDir
     this.docPathMap = docPathMap
@@ -171,10 +205,10 @@ export class FileSyncBridge {
       interval: 500,
       atomic: true,
       ignored: [
-        /(^|[/\\])\../, // dotfiles
-        /\.(aux|log|fls|fdb_latexmk|synctex\.gz|bbl|blg|out|toc|lof|lot|nav|snm|vrb|pdf|pdfxref|stderr|stdout|chktex)$/, // LaTeX output files
+        /(^|[/\\])\../, // dotfiles (also covers .build/ and .claude/)
+        JUNK_EXT_RE, // pure build noise (aux/log/synctex/…) — never project content
         /(?:^|[/\\])(?:CLAUDE\.md|\.mcp\.json)$/, // App-generated config files
-        /(?:^|[/\\])claude-workspace(?:[/\\]|$)/ // Claude Code scratch space (not synced)
+        /(?:^|[/\\])(?:claude-workspace|__MACOSX)(?:[/\\]|$)/ // scratch space + zip junk
       ]
     })
 
@@ -184,15 +218,28 @@ export class FileSyncBridge {
       this.scanForOrphanedFiles()
     })
 
+    // Periodic rescan: catches files the watcher missed and retries failed
+    // creates/uploads (e.g. transient network errors, expired CSRF tokens).
+    this.rescanTimer = setInterval(() => {
+      if (!this.stopped) this.scanForOrphanedFiles()
+    }, 60_000)
+
     this.watcher.on('change', (absPath: string) => {
       const relPath = absPath.replace(this.tmpDir + '/', '')
       bridgeLog(`[FileSyncBridge] chokidar change: ${relPath}`)
-      this.onFileChanged(relPath)
+      // A real fs event means new content — give parked failures a fresh chance
+      this.permanentFailures.delete(relPath)
+      if (this.pathDocMap[relPath] || this.pathFileRefMap[relPath]) {
+        this.onFileChanged(relPath)
+      } else if (!this.pendingCreates.has(relPath)) {
+        this.onNewLocalFile(relPath)
+      }
     })
 
     this.watcher.on('add', (absPath: string) => {
       const relPath = absPath.replace(this.tmpDir + '/', '')
       bridgeLog(`[FileSyncBridge] chokidar add: ${relPath}`)
+      this.permanentFailures.delete(relPath)
       if (this.pathDocMap[relPath] || this.pathFileRefMap[relPath]) {
         // Known file — process as change
         this.onFileChanged(relPath)
@@ -218,6 +265,22 @@ export class FileSyncBridge {
       clearTimeout(timer)
     }
     this.debounceTimers.clear()
+
+    if (this.rescanTimer) {
+      clearInterval(this.rescanTimer)
+      this.rescanTimer = null
+    }
+    for (const timer of this.retryTimers.values()) {
+      clearTimeout(timer)
+    }
+    this.retryTimers.clear()
+    this.retryAttempts.clear()
+    for (const timer of this.pendingCreateExpiry.values()) {
+      clearTimeout(timer)
+    }
+    this.pendingCreateExpiry.clear()
+    this.permanentFailures.clear()
+    this.compileOutputs.clear()
 
     // Remove event handlers
     if (this.serverEventHandler) {
@@ -778,28 +841,44 @@ export class FileSyncBridge {
   }
 
   private async processBinaryChange(relPath: string, fileRefId: string): Promise<void> {
+    if (this.stopped) return
+    // Revalidate — the entity may have been renamed/moved/removed while a
+    // retry was pending; the stale closure must not upload under the old path.
+    if (this.pathFileRefMap[relPath] !== fileRefId) {
+      this.clearRetryState(relPath, false)
+      return
+    }
+
     const fullPath = join(this.tmpDir, relPath)
 
     let fileData: Buffer
     try {
       fileData = await readFile(fullPath)
     } catch {
+      this.clearRetryState(relPath, false)
       return // file deleted or unreadable
     }
 
     // Layer 2: Hash equality check
     const newHash = createHash('sha1').update(fileData).digest('hex')
     const oldHash = this.binaryHashes.get(relPath)
-    if (newHash === oldHash) return
+    if (newHash === oldHash) {
+      this.clearRetryState(relPath) // content reverted to the synced state
+      return
+    }
 
     bridgeLog(`[FileSyncBridge] binary change detected: ${relPath} (${fileData.length} bytes)`)
-    this.binaryHashes.set(relPath, newHash)
 
-    // Upload to Overleaf via REST API (this replaces the existing file)
+    // Upload to Overleaf via REST API (this replaces the existing file).
+    // Only record the hash after a successful upload — otherwise a failed
+    // upload would make the change look synced and it would never retry.
     try {
       await this.uploadBinary(relPath, fileData)
+      this.binaryHashes.set(relPath, newHash)
+      this.clearRetryState(relPath)
     } catch (e) {
-      bridgeLog(`[FileSyncBridge] failed to upload binary ${relPath}:`, e)
+      bridgeLog(`[FileSyncBridge] failed to upload binary ${relPath}: ${e}`)
+      this.scheduleRetry(relPath, () => this.processBinaryChange(relPath, fileRefId))
     }
   }
 
@@ -840,7 +919,30 @@ export class FileSyncBridge {
     })
   }
 
-  private async uploadBinary(relPath: string, fileData: Buffer, overrideFolderId?: string): Promise<string | undefined> {
+  /** Refresh session cookie + CSRF token (e.g. after a 403), returns true if updated */
+  private async tryRefreshAuth(): Promise<boolean> {
+    if (!this.refreshAuth) return false
+    try {
+      const auth = await this.refreshAuth()
+      if (auth) {
+        this.cookie = auth.cookie
+        this.csrfToken = auth.csrfToken
+        bridgeLog('[FileSyncBridge] auth refreshed')
+        return true
+      }
+    } catch (e) {
+      bridgeLog(`[FileSyncBridge] auth refresh failed: ${e}`)
+    }
+    return false
+  }
+
+  /** Update auth credentials (called from main when session/CSRF rotates) */
+  updateAuth(cookie: string, csrfToken: string): void {
+    this.cookie = cookie
+    this.csrfToken = csrfToken
+  }
+
+  private async uploadBinary(relPath: string, fileData: Buffer, overrideFolderId?: string, isRetryAfterAuth = false): Promise<string | undefined> {
     const fileName = relPath.includes('/') ? relPath.split('/').pop()! : relPath
     const folderId = overrideFolderId || this.findFolderIdForPath(relPath)
 
@@ -881,6 +983,17 @@ export class FileSyncBridge {
         res.on('data', (chunk: Buffer) => { resBody += chunk.toString() })
         res.on('end', () => {
           bridgeLog(`[FileSyncBridge] upload ${relPath}: ${res.statusCode} ${resBody.slice(0, 200)}`)
+          if (res.statusCode === 403 && !isRetryAfterAuth) {
+            // Stale CSRF token — refresh and retry once
+            this.tryRefreshAuth().then((refreshed) => {
+              if (refreshed) {
+                this.uploadBinary(relPath, fileData, overrideFolderId, true).then(resolve, reject)
+              } else {
+                reject(new Error(`HTTP 403 (auth refresh failed)`))
+              }
+            })
+            return
+          }
           try {
             const data = JSON.parse(resBody)
             if (data.success !== false && !data.error) {
@@ -1291,8 +1404,13 @@ export class FileSyncBridge {
 
     for (const relPath of allFiles) {
       if (this.pathDocMap[relPath] || this.pathFileRefMap[relPath]) continue
-      // Skip LaTeX output files, app-generated config files, and scratch space
-      if (/\.(aux|log|fls|fdb_latexmk|synctex\.gz|bbl|blg|out|toc|lof|lot|nav|snm|vrb|pdf|pdfxref|stderr|stdout|chktex|synctex)/.test(relPath)) continue
+      // Skip files already scheduled for retry (backoff manages them) and
+      // files that exhausted their retries (a new fs event resets those)
+      if (this.retryTimers.has(relPath)) continue
+      if (this.pendingCreates.has(relPath)) continue
+      if (this.permanentFailures.has(relPath)) continue
+      // Skip LaTeX build artifacts, dotfiles, app config files, and scratch space
+      if (this.isCompileArtifact(relPath)) continue
       if (/(^|[/\\])\./.test(relPath)) continue
       if (/(?:^|[/\\])(?:CLAUDE\.md|\.mcp\.json)$/.test(relPath)) continue
       if (relPath.startsWith('claude-workspace/') || relPath === 'claude-workspace') continue
@@ -1312,8 +1430,8 @@ export class FileSyncBridge {
     if (this.stopped) return
     if (this.writesInProgress.has(relPath)) return
 
-    // Skip LaTeX output files, dotfiles, app-generated config files, and scratch space
-    if (/\.(aux|log|fls|fdb_latexmk|synctex\.gz|bbl|blg|out|toc|lof|lot|nav|snm|vrb|pdf|pdfxref|stderr|stdout|chktex)$/.test(relPath)) return
+    // Skip LaTeX build artifacts, dotfiles, app config files, and scratch space
+    if (this.isCompileArtifact(relPath)) return
     if (/(^|[/\\])\./.test(relPath)) return
     if (/(?:^|[/\\])(?:CLAUDE\.md|\.mcp\.json)$/.test(relPath)) return
     if (relPath.startsWith('claude-workspace/') || relPath === 'claude-workspace') return
@@ -1332,9 +1450,17 @@ export class FileSyncBridge {
   private async processNewFile(relPath: string): Promise<void> {
     if (this.stopped) return
     // Double-check it's still unknown (might have been registered by a server event)
-    if (this.pathDocMap[relPath] || this.pathFileRefMap[relPath]) return
+    if (this.pathDocMap[relPath] || this.pathFileRefMap[relPath]) {
+      this.clearRetryState(relPath, false)
+      return
+    }
+    // File may have been deleted between detection and processing
+    if (!existsSync(join(this.tmpDir, relPath))) {
+      this.clearRetryState(relPath, false)
+      return
+    }
 
-    this.pendingCreates.add(relPath)
+    this.addPendingCreate(relPath)
 
     try {
       if (isTextExtension(relPath)) {
@@ -1342,12 +1468,117 @@ export class FileSyncBridge {
       } else {
         await this.uploadNewLocalBinary(relPath)
       }
+      this.clearRetryState(relPath)
     } catch (e) {
       bridgeLog(`[FileSyncBridge] failed to create ${relPath} on Overleaf: ${e}`)
+      this.scheduleRetry(relPath, () => this.processNewFile(relPath))
     } finally {
       // Keep in pendingCreates briefly to avoid processing the echoed server event
-      setTimeout(() => this.pendingCreates.delete(relPath), 5000)
+      this.expirePendingCreate(relPath)
     }
+  }
+
+  // ── Compile-artifact detection ───────────────────────────────
+
+  /** Register a file our own local compile will write (e.g. root main.pdf) */
+  addCompileOutput(relPath: string): void {
+    this.compileOutputs.add(relPath)
+  }
+
+  /**
+   * True when relPath is LaTeX build output rather than project content.
+   * Tier 1: pure-noise extensions. Tier 2: pdf/dvi/bbl/… are treated as
+   * output only with evidence of a local compile — either we tracked the
+   * output ourselves, or a same-basename .aux/.log/.fls/.fdb_latexmk exists
+   * (latexmk always leaves those next to what it builds). A standalone
+   * figure PDF or a .docx supplement has no such evidence and syncs.
+   */
+  private isCompileArtifact(relPath: string): boolean {
+    if (JUNK_EXT_RE.test(relPath)) return true
+    const m = relPath.match(MAYBE_ARTIFACT_EXT_RE)
+    if (!m) return false
+    if (this.compileOutputs.has(relPath)) return true
+    const base = relPath.replace(MAYBE_ARTIFACT_EXT_RE, '')
+    for (const ext of COMPILE_EVIDENCE_EXTS) {
+      if (existsSync(join(this.tmpDir, base + ext))) return true
+    }
+    return false
+  }
+
+  // ── pendingCreates bookkeeping ───────────────────────────────
+  //
+  // Files we are creating on Overleaf are guarded so the server's echo
+  // (reciveNewDoc/reciveNewFile) isn't processed as a remote create. The
+  // expiry timer is per-path and cancelled on re-add, so a retry attempt
+  // can't have its guard stripped by a stale timer from a failed attempt.
+
+  private addPendingCreate(relPath: string): void {
+    const existing = this.pendingCreateExpiry.get(relPath)
+    if (existing) clearTimeout(existing)
+    this.pendingCreateExpiry.delete(relPath)
+    this.pendingCreates.add(relPath)
+  }
+
+  private expirePendingCreate(relPath: string, delayMs = 5000): void {
+    const existing = this.pendingCreateExpiry.get(relPath)
+    if (existing) clearTimeout(existing)
+    this.pendingCreateExpiry.set(relPath, setTimeout(() => {
+      this.pendingCreateExpiry.delete(relPath)
+      this.pendingCreates.delete(relPath)
+    }, delayMs))
+  }
+
+  // ── Retry with exponential backoff ───────────────────────────
+  //
+  // Sync failures (expired CSRF token, transient network errors, server 5xx)
+  // must not silently drop files. Retries back off 5s → 10s → 20s → … capped
+  // at 5 minutes. After MAX_RETRY_ATTEMPTS the file is parked as a permanent
+  // failure (surfaced in the UI); a subsequent local change resets it.
+
+  private static readonly MAX_RETRY_ATTEMPTS = 8
+
+  private scheduleRetry(relPath: string, action: () => void): void {
+    if (this.stopped) return
+
+    const attempts = (this.retryAttempts.get(relPath) ?? 0) + 1
+    this.retryAttempts.set(relPath, attempts)
+
+    if (attempts > FileSyncBridge.MAX_RETRY_ATTEMPTS) {
+      bridgeLog(`[FileSyncBridge] giving up on ${relPath} after ${attempts - 1} attempts`)
+      this.permanentFailures.add(relPath)
+      this.retryAttempts.delete(relPath)
+      this.notifySyncStatus(relPath, 'failed')
+      return
+    }
+
+    const delay = Math.min(5000 * 2 ** (attempts - 1), 300_000)
+    bridgeLog(`[FileSyncBridge] retry #${attempts} for ${relPath} in ${Math.round(delay / 1000)}s`)
+    this.notifySyncStatus(relPath, 'retrying', attempts)
+
+    const existing = this.retryTimers.get(relPath)
+    if (existing) clearTimeout(existing)
+
+    this.retryTimers.set(relPath, setTimeout(() => {
+      this.retryTimers.delete(relPath)
+      if (!this.stopped) action()
+    }, delay))
+  }
+
+  /** Clear retry state; emits a "synced" status if the file was retrying */
+  private clearRetryState(relPath: string, notify = true): void {
+    const timer = this.retryTimers.get(relPath)
+    if (timer) clearTimeout(timer)
+    this.retryTimers.delete(relPath)
+    this.permanentFailures.delete(relPath)
+    if (this.retryAttempts.has(relPath)) {
+      this.retryAttempts.delete(relPath)
+      if (notify) this.notifySyncStatus(relPath, 'synced')
+    }
+  }
+
+  private notifySyncStatus(relPath: string, status: 'retrying' | 'synced' | 'failed', attempts?: number): void {
+    if (this.mainWindow.isDestroyed() || this.mainWindow.webContents.isDestroyed()) return
+    this.mainWindow.webContents.send('sync:fileStatus', { relPath, status, attempts })
   }
 
   /** Create a text doc on Overleaf and sync its content */
@@ -1477,8 +1708,16 @@ export class FileSyncBridge {
     throw new Error(`Failed to create folder "${dirPath}": HTTP ${result.status}`)
   }
 
-  /** POST to Overleaf REST API */
-  private overleafPost(path: string, body: object): Promise<{ ok: boolean; data?: any; status: number }> {
+  /** POST to Overleaf REST API. Refreshes auth and retries once on 403. */
+  private async overleafPost(path: string, body: object): Promise<{ ok: boolean; data?: any; status: number }> {
+    const result = await this.overleafPostRaw(path, body)
+    if (result.status === 403 && await this.tryRefreshAuth()) {
+      return this.overleafPostRaw(path, body)
+    }
+    return result
+  }
+
+  private overleafPostRaw(path: string, body: object): Promise<{ ok: boolean; data?: any; status: number }> {
     return new Promise((resolve, reject) => {
       const req = net.request({
         method: 'POST',

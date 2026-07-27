@@ -19,6 +19,11 @@ import StatusBar from './components/StatusBar'
 import type { OverleafDocSync } from './ot/overleafSync'
 import { colorForUser, type RemoteCursor } from './extensions/remoteCursors'
 import {
+  startAutocompleteSync,
+  stopAutocompleteSync,
+  scheduleAutocompleteRefresh,
+} from './extensions/latexAutocomplete'
+import {
   applyEntityCreated,
   applyEntityMoved,
   applyEntityRemoved,
@@ -106,17 +111,54 @@ export default function App() {
       if (sync) sync.reset(data.version, data.content)
     })
 
+    // Project-wide autocomplete data (all docs + official metadata endpoint)
+    const projectId = useAppStore.getState().overleafProjectId
+    if (projectId) startAutocompleteSync(projectId)
+    const refreshAutocomplete = () => {
+      const pid = useAppStore.getState().overleafProjectId
+      if (pid) scheduleAutocompleteRefresh(pid)
+    }
+
     // Listen for external edits from file sync bridge (disk changes)
     const unsubExternalEdit = window.api.onSyncExternalEdit((data) => {
       const sync = activeDocSyncs.get(data.docId)
       if (sync) sync.replaceContent(data.content, data.baseContent)
+      refreshAutocomplete()
+    })
+
+    // Surface sync retry state in the status bar
+    const unsubFileStatus = window.api.onSyncFileStatus?.((data) => {
+      if (data.status === 'retrying') {
+        setStatusMessage(`Sync failed for ${data.relPath} — retrying (attempt ${data.attempts ?? 1})`)
+      } else if (data.status === 'failed') {
+        setStatusMessage(`Sync failed for ${data.relPath} — gave up (edit the file to retry)`)
+      } else {
+        setStatusMessage(`Synced ${data.relPath}`)
+      }
+    })
+
+    // Session cookie died mid-session — sync can't recover without a re-login
+    const unsubAuthExpired = window.api.onAuthSessionExpired?.(() => {
+      setStatusMessage('Overleaf session expired — please sign in again')
     })
 
     // Keep the file tree in sync with Overleaf project-entity socket events.
-    const unsubEntityCreated = window.api.onSyncEntityCreated(applyEntityCreated)
-    const unsubEntityRemoved = window.api.onSyncEntityRemoved(applyEntityRemoved)
-    const unsubEntityRenamed = window.api.onSyncEntityRenamed(applyEntityRenamed)
-    const unsubEntityMoved = window.api.onSyncEntityMoved(applyEntityMoved)
+    const unsubEntityCreated = window.api.onSyncEntityCreated((data) => {
+      applyEntityCreated(data)
+      refreshAutocomplete()
+    })
+    const unsubEntityRemoved = window.api.onSyncEntityRemoved((data) => {
+      applyEntityRemoved(data)
+      refreshAutocomplete()
+    })
+    const unsubEntityRenamed = window.api.onSyncEntityRenamed((data) => {
+      applyEntityRenamed(data)
+      refreshAutocomplete()
+    })
+    const unsubEntityMoved = window.api.onSyncEntityMoved((data) => {
+      applyEntityMoved(data)
+      refreshAutocomplete()
+    })
 
     // Listen for initial comment data (threads + contexts) from background fetch on connect
     const unsubInitThreads = window.api.onCommentsInitThreads?.((data) => {
@@ -158,7 +200,7 @@ export default function App() {
         doc_id: string; row: number; column: number
       }
       remoteCursors.set(data.id, {
-        userId: data.id,
+        userId: data.user_id || data.id,
         name: data.name || data.email?.split('@')[0] || 'User',
         color: colorForUser(data.user_id || data.id),
         row: data.row,
@@ -188,7 +230,7 @@ export default function App() {
         if (u.cursorData) {
           const name = [u.first_name, u.last_name].filter(Boolean).join(' ') || u.email?.split('@')[0] || 'User'
           remoteCursors.set(u.client_id, {
-            userId: u.client_id,
+            userId: u.user_id || u.client_id,
             name,
             color: colorForUser(u.user_id || u.client_id),
             row: u.cursorData.row,
@@ -216,7 +258,10 @@ export default function App() {
       unsubCommentsEvent?.()
       unsubCursorUpdate()
       unsubCursorDisconnected()
+      unsubFileStatus?.()
+      unsubAuthExpired?.()
       remoteCursors.clear()
+      stopAutocompleteSync()
     }
   }, [screen, setStatusMessage])
 

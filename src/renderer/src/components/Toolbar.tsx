@@ -108,8 +108,9 @@ export default function Toolbar({ onCompile, onLocalCompile, onBack }: ToolbarPr
             {showUsersPopover && (
               <div className="users-popover">
                 <div className="users-popover-title">Online Users</div>
-                {Array.from(remoteCursors.values()).map((u) => (
-                  <div key={u.userId} className="users-popover-item">
+                {/* Key by client id (map key) — one user can have several clients */}
+                {Array.from(remoteCursors.entries()).map(([clientId, u]) => (
+                  <div key={clientId} className="users-popover-item">
                     <span className="users-popover-dot" style={{ background: u.color }} />
                     <span className="users-popover-name">{u.name}</span>
                   </div>

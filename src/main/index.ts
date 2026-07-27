@@ -431,8 +431,56 @@ async function loadOverleafSession(): Promise<void> {
   } catch { /* no saved session */ }
 }
 
-// Helper: make authenticated request to Overleaf web API
+/**
+ * Re-fetch the CSRF token from the projects page (it can rotate/expire).
+ * Single-flight: concurrent 403s share one refresh. Validates the session
+ * first — when the cookie itself is dead, the /project fetch would redirect
+ * to the login page whose (anonymous) CSRF token must not be adopted.
+ */
+let csrfRefreshInFlight: Promise<boolean> | null = null
+
+function refreshCsrfToken(): Promise<boolean> {
+  if (csrfRefreshInFlight) return csrfRefreshInFlight
+  csrfRefreshInFlight = (async () => {
+    try {
+      // Electron's net follows redirects, so an expired session may surface
+      // as a 200 login page rather than a 401 — require a JSON body too.
+      const session = await overleafFetchRaw('/user/projects')
+      if (!session.ok || typeof session.data !== 'object' || session.data === null) {
+        console.log('[overleaf] session expired — cannot refresh CSRF token')
+        sendToRenderer('auth:sessionExpired')
+        return false
+      }
+      const result = await overleafFetchRaw('/project', { raw: true })
+      if (!result.ok || typeof result.data !== 'string') return false
+      const m = (result.data as string).match(/ol-csrfToken[^>]*content="([^"]+)"/)
+      if (m) {
+        overleafCsrfToken = m[1]
+        saveOverleafSession()
+        return true
+      }
+      return false
+    } finally {
+      csrfRefreshInFlight = null
+    }
+  })()
+  return csrfRefreshInFlight
+}
+
+// Helper: make authenticated request to Overleaf web API.
+// On 403 (stale CSRF token), refreshes the token and retries once.
 async function overleafFetch(path: string, options: { method?: string; body?: string; raw?: boolean; cookie?: string } = {}): Promise<{ ok: boolean; status: number; data: unknown; setCookies: string[] }> {
+  const result = await overleafFetchRaw(path, options)
+  if (result.status === 403 && options.method && options.method !== 'GET') {
+    console.log(`[overleaf] 403 on ${options.method} ${path} — refreshing CSRF token and retrying`)
+    if (await refreshCsrfToken()) {
+      return overleafFetchRaw(path, options)
+    }
+  }
+  return result
+}
+
+async function overleafFetchRaw(path: string, options: { method?: string; body?: string; raw?: boolean; cookie?: string } = {}): Promise<{ ok: boolean; status: number; data: unknown; setCookies: string[] }> {
   return new Promise((resolve) => {
     const url = `https://www.overleaf.com${path}`
     const request = net.request({ url, method: options.method || 'GET' })
@@ -563,6 +611,8 @@ ipcMain.handle('overleaf:webLogin', async () => {
       if (ok && !resolved) {
         resolved = true
         saveOverleafSession()
+        // Push fresh credentials into a live sync bridge (re-login mid-session)
+        fileSyncBridge?.updateAuth(overleafSessionCookie, overleafCsrfToken)
         loginWindow.close()
         resolve({ success: true })
       }
@@ -854,7 +904,16 @@ ipcMain.handle('ot:connect', async (_e, projectId: string) => {
 
     // Set up file sync bridge for bidirectional sync
     const tmpDir = compilationManager.dir
-    fileSyncBridge = new FileSyncBridge(overleafSock, tmpDir, docPathMap, pathDocMap, fileRefs, mainWindow!, projectId, overleafSessionCookie, overleafCsrfToken)
+    fileSyncBridge = new FileSyncBridge(
+      overleafSock, tmpDir, docPathMap, pathDocMap, fileRefs, mainWindow!,
+      projectId, overleafSessionCookie, overleafCsrfToken,
+      async () => {
+        // Re-fetch CSRF token (rotates over long sessions); cookie may also
+        // have been refreshed by a re-login in the meantime.
+        const ok = await refreshCsrfToken()
+        return ok ? { cookie: overleafSessionCookie, csrfToken: overleafCsrfToken } : null
+      }
+    )
     await fileSyncBridge.start()
 
     // Start MCP compile watcher (detects compile requests from Claude Code)
@@ -1198,6 +1257,19 @@ ipcMain.handle('sync:contentChanged', async (_e, docId: string, content: string)
   fileSyncBridge?.onEditorContentChanged(docId, content)
 })
 
+// Renderer ← bridge: all synced doc contents (for project-wide autocomplete)
+ipcMain.handle('sync:getAllDocContents', async () => {
+  return fileSyncBridge ? fileSyncBridge.getAllDocContents() : []
+})
+
+// Official metadata endpoint: labels + package command snippets per doc
+ipcMain.handle('overleaf:getMetadata', async (_e, projectId: string) => {
+  if (!overleafSessionCookie) return { success: false, message: 'not_logged_in' }
+  const result = await overleafFetch(`/project/${projectId}/metadata`)
+  if (!result.ok) return { success: false, message: `HTTP ${result.status}` }
+  return { success: true, data: result.data }
+})
+
 // ── Cursor Tracking ────────────────────────────────────────────
 
 ipcMain.handle('cursor:update', async (_e, docId: string, row: number, column: number) => {
@@ -1264,6 +1336,8 @@ ipcMain.handle('overleaf:listProjects', async () => {
     lastUpdatedBy?: { firstName: string; lastName: string; email?: string } | null
     accessLevel?: string
     source?: string
+    archived?: boolean
+    trashed?: boolean
   }>
 
   return {
@@ -1275,7 +1349,9 @@ ipcMain.handle('overleaf:listProjects', async () => {
       owner: p.owner ? { firstName: p.owner.firstName, lastName: p.owner.lastName, email: p.owner.email } : undefined,
       lastUpdatedBy: p.lastUpdatedBy ? { firstName: p.lastUpdatedBy.firstName, lastName: p.lastUpdatedBy.lastName } : null,
       accessLevel: p.accessLevel || 'unknown',
-      source: p.source || ''
+      source: p.source || '',
+      archived: !!p.archived,
+      trashed: !!p.trashed
     }))
   }
 })
@@ -1343,6 +1419,127 @@ ipcMain.handle('overleaf:uploadProject', async () => {
     req.write(body)
     req.end()
   })
+})
+
+// ── Project Dashboard Operations (official Overleaf endpoints) ──
+//
+// Endpoints mirror services/web/frontend/js/features/project-list/util/api.ts
+// in the Overleaf source (the web dashboard's own API client).
+
+ipcMain.handle('overleaf:getTags', async () => {
+  if (!overleafSessionCookie) return { success: false, message: 'not_logged_in' }
+  const result = await overleafFetch('/tag')
+  if (!result.ok) return { success: false, message: `HTTP ${result.status}` }
+  return { success: true, tags: result.data }
+})
+
+ipcMain.handle('overleaf:createTag', async (_e, name: string, color?: string) => {
+  if (!overleafSessionCookie) return { success: false, message: 'not_logged_in' }
+  const result = await overleafFetch('/tag', {
+    method: 'POST',
+    body: JSON.stringify({ name, color })
+  })
+  if (!result.ok) return { success: false, message: `HTTP ${result.status}` }
+  return { success: true, tag: result.data }
+})
+
+ipcMain.handle('overleaf:editTag', async (_e, tagId: string, name: string, color?: string) => {
+  if (!overleafSessionCookie) return { success: false, message: 'not_logged_in' }
+  const result = await overleafFetch(`/tag/${tagId}/edit`, {
+    method: 'POST',
+    body: JSON.stringify({ name, color })
+  })
+  return { success: result.ok, message: result.ok ? '' : `HTTP ${result.status}` }
+})
+
+ipcMain.handle('overleaf:deleteTag', async (_e, tagId: string) => {
+  if (!overleafSessionCookie) return { success: false, message: 'not_logged_in' }
+  const result = await overleafFetch(`/tag/${tagId}`, { method: 'DELETE' })
+  return { success: result.ok, message: result.ok ? '' : `HTTP ${result.status}` }
+})
+
+ipcMain.handle('overleaf:addProjectsToTag', async (_e, tagId: string, projectIds: string[]) => {
+  if (!overleafSessionCookie) return { success: false, message: 'not_logged_in' }
+  const result = await overleafFetch(`/tag/${tagId}/projects`, {
+    method: 'POST',
+    body: JSON.stringify({ projectIds })
+  })
+  return { success: result.ok, message: result.ok ? '' : `HTTP ${result.status}` }
+})
+
+ipcMain.handle('overleaf:removeProjectsFromTag', async (_e, tagId: string, projectIds: string[]) => {
+  if (!overleafSessionCookie) return { success: false, message: 'not_logged_in' }
+  const result = await overleafFetch(`/tag/${tagId}/projects/remove`, {
+    method: 'POST',
+    body: JSON.stringify({ projectIds })
+  })
+  return { success: result.ok, message: result.ok ? '' : `HTTP ${result.status}` }
+})
+
+// Archive / trash state transitions. Paths match the official router
+// (case-sensitive: /Project/:id/archive vs /project/:id/trash).
+ipcMain.handle('overleaf:setProjectState', async (_e, projectId: string, action: string) => {
+  if (!overleafSessionCookie) return { success: false, message: 'not_logged_in' }
+
+  const routes: Record<string, { method: string; path: string }> = {
+    archive: { method: 'POST', path: `/project/${projectId}/archive` },
+    unarchive: { method: 'DELETE', path: `/project/${projectId}/archive` },
+    trash: { method: 'POST', path: `/project/${projectId}/trash` },
+    untrash: { method: 'DELETE', path: `/project/${projectId}/trash` },
+    delete: { method: 'DELETE', path: `/project/${projectId}` },
+    leave: { method: 'POST', path: `/project/${projectId}/leave` }
+  }
+  const route = routes[action]
+  if (!route) return { success: false, message: `unknown action: ${action}` }
+
+  const result = await overleafFetch(route.path, { method: route.method, body: '{}' })
+  return { success: result.ok, message: result.ok ? '' : `HTTP ${result.status}` }
+})
+
+ipcMain.handle('overleaf:renameProject', async (_e, projectId: string, newName: string) => {
+  if (!overleafSessionCookie) return { success: false, message: 'not_logged_in' }
+  const result = await overleafFetch(`/project/${projectId}/rename`, {
+    method: 'POST',
+    body: JSON.stringify({ newProjectName: newName })
+  })
+  return { success: result.ok, message: result.ok ? '' : `HTTP ${result.status}` }
+})
+
+ipcMain.handle('overleaf:cloneProject', async (_e, projectId: string, projectName: string, tags?: string[]) => {
+  if (!overleafSessionCookie) return { success: false, message: 'not_logged_in' }
+  const result = await overleafFetch(`/project/${projectId}/clone`, {
+    method: 'POST',
+    body: JSON.stringify({ projectName, tags: (tags || []).map((id) => ({ id })) })
+  })
+  if (!result.ok) return { success: false, message: `HTTP ${result.status}` }
+  const data = result.data as { project_id?: string }
+  return { success: true, projectId: data.project_id }
+})
+
+ipcMain.handle('overleaf:downloadProjectZip', async (_e, projectIds: string[], suggestedName: string) => {
+  if (!overleafSessionCookie) return { success: false, message: 'not_logged_in' }
+  if (projectIds.length === 0) return { success: false, message: 'no projects' }
+
+  const { canceled, filePath } = await dialog.showSaveDialog({
+    title: 'Download Project',
+    defaultPath: `${suggestedName || 'projects'}.zip`,
+    filters: [{ name: 'ZIP Archives', extensions: ['zip'] }]
+  })
+  if (canceled || !filePath) return { success: false, message: 'cancelled' }
+
+  // Official download routes: single /project/:id/download/zip,
+  // multi /project/download/zip?project_ids=a,b
+  const url = projectIds.length === 1
+    ? `https://www.overleaf.com/project/${projectIds[0]}/download/zip`
+    : `https://www.overleaf.com/project/download/zip?project_ids=${projectIds.join(',')}`
+
+  try {
+    const data = await fetchBinary(url, overleafSessionCookie)
+    await writeFile(filePath, Buffer.from(data))
+    return { success: true, path: filePath }
+  } catch (e) {
+    return { success: false, message: String(e) }
+  }
 })
 
 // ── File Operations via Overleaf REST API ──────────────────────
@@ -1491,6 +1688,10 @@ ipcMain.handle('overleaf:socketCompile', async (_e, mainTexRelPath: string) => {
   if (!compilationManager || !overleafSock?.projectData) {
     return { success: false, log: 'No compilation manager or not connected', pdfPath: '' }
   }
+
+  // latexmk writes its output into the synced dir root (-outdir) — tell the
+  // bridge so the produced PDF is never uploaded to Overleaf as content.
+  fileSyncBridge?.addCompileOutput(basename(mainTexRelPath, '.tex') + '.pdf')
 
   // Bridge already keeps all docs synced to disk. Sync content to compilation manager.
   if (fileSyncBridge) {

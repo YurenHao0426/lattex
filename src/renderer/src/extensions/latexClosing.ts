@@ -2,7 +2,7 @@
 // Licensed under AGPL-3.0 - see LICENSE file
 
 import { EditorView, keymap } from '@codemirror/view'
-import { EditorSelection } from '@codemirror/state'
+import { EditorSelection, Prec } from '@codemirror/state'
 
 // ── Helpers ──────────────────────────────────────────────────────────
 
@@ -223,8 +223,11 @@ const deletePairKeymap = keymap.of([
  */
 export function latexClosing() {
   return [
-    beginEnvEnterKeymap,
+    // Prec.high so these win over defaultKeymap's Enter/Backspace (which are
+    // registered earlier in the editor's extension list) but stay below the
+    // completion keymap's Prec.highest bindings while the popup is open.
+    Prec.high(beginEnvEnterKeymap),
     latexInputHandler,
-    deletePairKeymap,
+    Prec.high(deletePairKeymap),
   ]
 }

@@ -458,16 +458,18 @@ export default function PdfViewer() {
 
       for (let i = 1; i <= pdf.numPages; i++) {
         let text = pdfTextCache.current.get(i)
-        if (!text) {
+        if (text === undefined) {
           try {
             const page = await pdf.getPage(i)
             const tc = await page.getTextContent()
-            text = tc.items.map((item: any) => item.str).join(' ')
-            pdfTextCache.current.set(i, text)
+            const extracted: string = tc.items.map((item: any) => item.str).join(' ')
+            text = extracted
+            pdfTextCache.current.set(i, extracted)
           } catch {
             continue
           }
         }
+        if (text === undefined) continue
         const lower = text.toLowerCase()
         let pos = 0
         while ((pos = lower.indexOf(q, pos)) !== -1) {
