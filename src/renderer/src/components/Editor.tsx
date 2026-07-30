@@ -88,6 +88,7 @@ export default function Editor() {
   const docSyncRef = useRef<OverleafDocSync | null>(null)
 
   const cursorThrottleRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const wsSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const [editorFontSize, setEditorFontSize] = useState(13.5)
 
   // Add comment state
@@ -181,6 +182,19 @@ export default function Editor() {
         const docId = pathDocMap[activeTab]
         if (docId) {
           window.api.syncContentChanged(docId, newContent)
+        } else if (activeTab.startsWith('claude-workspace/')) {
+          // Workspace files live only on disk — debounced auto-save
+          const dir = useAppStore.getState().syncDir
+          if (dir) {
+            if (wsSaveTimerRef.current) clearTimeout(wsSaveTimerRef.current)
+            const tab = activeTab
+            wsSaveTimerRef.current = setTimeout(() => {
+              wsSaveTimerRef.current = null
+              window.api.writeFile(`${dir}/${tab}`, newContent)
+                .then(() => useAppStore.getState().markModified(tab, false))
+                .catch(() => useAppStore.getState().setStatusMessage(`Failed to save ${tab}`))
+            }, 500)
+          }
         }
       }
       if (update.selectionSet) {
@@ -301,6 +315,18 @@ export default function Editor() {
     }
 
     return () => {
+      // Flush a pending workspace save so switching tabs never loses edits
+      if (wsSaveTimerRef.current && activeTab?.startsWith('claude-workspace/')) {
+        clearTimeout(wsSaveTimerRef.current)
+        wsSaveTimerRef.current = null
+        const dir = useAppStore.getState().syncDir
+        const content = useAppStore.getState().fileContents[activeTab]
+        if (dir && content !== undefined) {
+          window.api.writeFile(`${dir}/${activeTab}`, content)
+            .then(() => useAppStore.getState().markModified(activeTab, false))
+            .catch(() => {})
+        }
+      }
       if (docSyncRef.current) {
         const docId = pathDocMap[activeTab!]
         if (docId) {

@@ -486,6 +486,56 @@ html, body, #root {
   border-bottom: 1px solid var(--border);
 }
 
+/* Project / Workspace view toggle */
+.file-tree-tabs {
+  padding: 6px 8px;
+  gap: 4px;
+  justify-content: flex-start;
+}
+.file-tree-tab {
+  flex: 1;
+  padding: 4px 8px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  background: none;
+  border: none;
+  border-radius: var(--radius);
+  cursor: pointer;
+  font-family: var(--font-sans);
+}
+.file-tree-tab:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+.file-tree-tab.active {
+  background: var(--bg-active);
+  color: var(--text-primary);
+}
+
+.file-tree-ws-toolbar {
+  display: flex;
+  gap: 4px;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+}
+.file-tree-ws-btn {
+  padding: 3px 8px;
+  font-size: 11px;
+  color: var(--text-secondary);
+  background: var(--bg-tertiary);
+  border: none;
+  border-radius: var(--radius);
+  cursor: pointer;
+  font-family: var(--font-sans);
+}
+.file-tree-ws-btn:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
 .file-tree-action {
   width: 22px;
   height: 22px;

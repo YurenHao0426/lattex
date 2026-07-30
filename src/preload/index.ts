@@ -12,8 +12,20 @@ window.addEventListener('wheel', (e) => {
 
 const api = {
   // File system
-  readFile: (path: string) => ipcRenderer.invoke('fs:readFile', path),
+  readFile: (path: string) => ipcRenderer.invoke('fs:readFile', path) as Promise<string>,
   readBinary: (path: string) => ipcRenderer.invoke('fs:readBinary', path) as Promise<ArrayBuffer>,
+  writeFile: (path: string, content: string) => ipcRenderer.invoke('fs:writeFile', path, content) as Promise<void>,
+  listDirTree: (rootPath: string, pathPrefix: string) =>
+    ipcRenderer.invoke('fs:listDirTree', rootPath, pathPrefix) as Promise<Array<{
+      name: string; path: string; isDir: boolean
+      children?: Array<{ name: string; path: string; isDir: boolean; children?: unknown[] }>
+    }>>,
+  mkdirp: (path: string) => ipcRenderer.invoke('fs:mkdirp', path) as Promise<void>,
+  renamePath: (oldPath: string, newPath: string) => ipcRenderer.invoke('fs:rename', oldPath, newPath) as Promise<void>,
+  deletePath: (path: string) => ipcRenderer.invoke('fs:deletePath', path) as Promise<void>,
+  copyPath: (src: string, dest: string) => ipcRenderer.invoke('fs:copyPath', src, dest) as Promise<void>,
+  pathExists: (path: string) => ipcRenderer.invoke('fs:exists', path) as Promise<boolean>,
+  openPath: (path: string) => ipcRenderer.invoke('shell:openPath', path) as Promise<string>,
 
   // LaTeX
   onCompileLog: (cb: (log: string) => void) => {

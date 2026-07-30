@@ -73,6 +73,8 @@ Claude Code can edit `.tex` files directly — changes sync to Overleaf in real-
 | `get_compile_errors` | Get parsed errors from last compile |
 | `get_compile_warnings` | Get parsed warnings from last compile |
 | `get_compile_log` | Get raw compile log output |
+| `search_citation` | Search papers on Semantic Scholar, returns BibTeX |
+| `search_openalex` | Search works on OpenAlex; BibTeX cross-checked against Semantic Scholar (unverified entries are flagged) |
 
 ### Example Workflow
 

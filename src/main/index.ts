@@ -2,8 +2,9 @@
 // Licensed under AGPL-3.0 - see LICENSE file
 
 import { app, BrowserWindow, ipcMain, dialog, shell, net } from 'electron'
-import { join, basename, relative, extname } from 'path'
-import { copyFile, readFile, writeFile, mkdir as mkdirAsync, unlink, readdir, stat } from 'fs/promises'
+import { join, basename, dirname, relative, extname } from 'path'
+import { copyFile, readFile, writeFile, mkdir as mkdirAsync, unlink, readdir, stat, rename as fsRename, rm, cp } from 'fs/promises'
+import { existsSync } from 'fs'
 import { spawn } from 'child_process'
 import * as pty from 'node-pty'
 import { OverleafSocket, type RootFolder, type SubFolder, type JoinDocResult } from './overleafSocket'
@@ -158,6 +159,82 @@ ipcMain.handle('fs:readFile', async (_e, filePath: string) => {
 ipcMain.handle('fs:readBinary', async (_e, filePath: string) => {
   const buffer = await readFile(filePath)
   return buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength)
+})
+
+// ── Workspace file operations (agent scratch space browser) ─────
+
+ipcMain.handle('fs:writeFile', async (_e, filePath: string, content: string) => {
+  await mkdirAsync(dirname(filePath), { recursive: true })
+  await writeFile(filePath, content, 'utf-8')
+})
+
+interface DiskNode {
+  name: string
+  path: string
+  isDir: boolean
+  children?: DiskNode[]
+}
+
+// List a directory tree from disk. Paths in the result are `pathPrefix` +
+// path relative to rootPath (so the renderer can key tabs consistently).
+ipcMain.handle('fs:listDirTree', async (_e, rootPath: string, pathPrefix: string) => {
+  const MAX_ENTRIES_PER_DIR = 500
+  const MAX_DEPTH = 10
+
+  async function walk(dir: string, rel: string, depth: number): Promise<DiskNode[]> {
+    if (depth > MAX_DEPTH) return []
+    let entries
+    try {
+      entries = await readdir(dir, { withFileTypes: true })
+    } catch {
+      return []
+    }
+    entries = entries
+      .filter((e) => !e.name.startsWith('.'))
+      .sort((a, b) =>
+        (b.isDirectory() ? 1 : 0) - (a.isDirectory() ? 1 : 0) || a.name.localeCompare(b.name)
+      )
+      .slice(0, MAX_ENTRIES_PER_DIR)
+
+    const nodes: DiskNode[] = []
+    for (const entry of entries) {
+      const relPath = rel ? `${rel}/${entry.name}` : entry.name
+      if (entry.isDirectory()) {
+        nodes.push({
+          name: entry.name,
+          path: pathPrefix + relPath,
+          isDir: true,
+          children: await walk(join(dir, entry.name), relPath, depth + 1)
+        })
+      } else if (entry.isFile()) {
+        nodes.push({ name: entry.name, path: pathPrefix + relPath, isDir: false })
+      }
+    }
+    return nodes
+  }
+
+  return walk(rootPath, '', 0)
+})
+
+ipcMain.handle('fs:mkdirp', async (_e, dirPath: string) => {
+  await mkdirAsync(dirPath, { recursive: true })
+})
+
+ipcMain.handle('fs:rename', async (_e, oldPath: string, newPath: string) => {
+  await fsRename(oldPath, newPath)
+})
+
+ipcMain.handle('fs:deletePath', async (_e, targetPath: string) => {
+  await rm(targetPath, { recursive: true, force: true })
+})
+
+ipcMain.handle('fs:copyPath', async (_e, src: string, dest: string) => {
+  await mkdirAsync(dirname(dest), { recursive: true })
+  await cp(src, dest, { recursive: true })
+})
+
+ipcMain.handle('fs:exists', async (_e, targetPath: string) => {
+  return existsSync(targetPath)
 })
 
 // ── API Key Storage ─────────────────────────────────────────────
@@ -1031,7 +1108,8 @@ You have MCP tools to interact with Overleaf. Use them proactively.
 - **read_compiled_pdf**: Get the path to the compiled PDF. After calling this, use your **Read** tool on the returned path to visually inspect the PDF. Use the \`pages\` parameter (e.g. \`"1-3"\`) to read specific pages. This lets you verify formatting, figures, tables, and layout.
 
 ### Bibliography
-- **search_citation**: Search academic papers by title, topic, or author. Returns matching papers with ready-to-use BibTeX entries that can be pasted directly into a \`.bib\` file. **Note:** Without a Semantic Scholar API key configured in LatteX settings, requests will likely be rate-limited (HTTP 429). With a key, the rate limit is 1 request/second.
+- **search_citation**: Search academic papers by title, topic, or author (Semantic Scholar). Returns matching papers with ready-to-use BibTeX entries that can be pasted directly into a \`.bib\` file. **Note:** Without a Semantic Scholar API key configured in LatteX settings, requests will likely be rate-limited (HTTP 429). With a key, the rate limit is 1 request/second.
+- **search_openalex**: Search scholarly works via OpenAlex (broader/faster-moving coverage, citation counts, venues). **Citation policy:** OpenAlex metadata lags, so BibTeX is cross-checked against Semantic Scholar — only entries marked "Semantic Scholar ✓" are authoritative. Entries marked "OpenAlex only ⚠" must be verified with a web search (publisher page / arXiv) before citing; very recent papers may be missing from both indexes.
 
 ### Workflows
 
@@ -1050,10 +1128,11 @@ You have MCP tools to interact with Overleaf. Use them proactively.
 5. To check visual output: use \`read_compiled_pdf\`, then Read the returned path with \`pages: "1-3"\`
 
 #### Bibliography Workflow
-1. Use \`search_citation\` with a topic or paper title to find references
-2. Copy the BibTeX entry into the \`.bib\` file
-3. Use \`\\cite{key}\` in the \`.tex\` file
-4. Compile to verify the citation renders correctly
+1. Use \`search_citation\` (Semantic Scholar) or \`search_openalex\` (broader coverage) to find references
+2. If the entry is marked "OpenAlex only ⚠", verify it with a web search before using it
+3. Copy the BibTeX entry into the \`.bib\` file
+4. Use \`\\cite{key}\` in the \`.tex\` file
+5. Compile to verify the citation renders correctly
 
 ## Workspace
 
@@ -1095,7 +1174,8 @@ The tools above come from LatteX's MCP server (standard stdio MCP — works with
             'mcp__lattex__get_compile_warnings',
             'mcp__lattex__get_compile_log',
             'mcp__lattex__read_compiled_pdf',
-            'mcp__lattex__search_citation'
+            'mcp__lattex__search_citation',
+            'mcp__lattex__search_openalex'
           ]
         }
       }, null, 2))
@@ -2024,6 +2104,10 @@ function fetchBinary(url: string, cookie?: string): Promise<ArrayBuffer> {
 
 ipcMain.handle('shell:openExternal', async (_e, url: string) => {
   await shell.openExternal(url)
+})
+
+ipcMain.handle('shell:openPath', async (_e, targetPath: string) => {
+  return shell.openPath(targetPath)
 })
 
 ipcMain.handle('shell:showInFinder', async (_e, path: string) => {

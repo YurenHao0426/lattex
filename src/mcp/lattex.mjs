@@ -544,6 +544,24 @@ const TOOLS = [
       },
       required: ['query']
     }
+  },
+  {
+    name: 'search_openalex',
+    description: 'Search scholarly works via OpenAlex (broad coverage: venues, citation counts, open access). IMPORTANT citation policy: OpenAlex metadata lags and can be noisy, so each result\'s BibTeX is cross-checked against Semantic Scholar — entries marked "Semantic Scholar ✓" are authoritative and safe to paste into a .bib file; entries marked "OpenAlex only ⚠" were NOT found in Semantic Scholar (common for very recent papers) and MUST be verified with a web search (publisher page / arXiv) before citing. Use search_citation for direct Semantic Scholar search.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        query: {
+          type: 'string',
+          description: 'Search query — paper title, topic, or keywords'
+        },
+        limit: {
+          type: 'number',
+          description: 'Max number of results. Default: 5, max: 8.'
+        }
+      },
+      required: ['query']
+    }
   }
 ]
 
@@ -590,6 +608,109 @@ function semanticScholarSearch(query, limit) {
       })
     })
     req.on('error', (e) => resolve({ ok: false, error: e.message }))
+    req.end()
+  })
+}
+
+// ── OpenAlex helpers ─────────────────────────────────────────
+//
+// OpenAlex has broad, fast-moving coverage but its metadata lags behind
+// publishers. Policy (see the search_openalex tool description): BibTeX is
+// taken from Semantic Scholar when the work exists there; otherwise the
+// entry is built from OpenAlex data and explicitly flagged as unverified.
+
+function openAlexSearch(query, limit) {
+  return new Promise((resolve) => {
+    const params = new URLSearchParams({
+      search: query,
+      per_page: String(limit),
+      // polite pool — OpenAlex asks for a contact address
+      mailto: 'lattex-app@users.noreply.github.com'
+    })
+    const options = {
+      hostname: 'api.openalex.org',
+      path: `/works?${params}`,
+      method: 'GET',
+      headers: { 'User-Agent': 'LatteX-MCP/1.0' }
+    }
+    const req = https.request(options, (res) => {
+      let data = ''
+      res.on('data', (chunk) => (data += chunk))
+      res.on('end', () => {
+        try {
+          const parsed = JSON.parse(data)
+          if (res.statusCode >= 200 && res.statusCode < 300) {
+            resolve({ ok: true, works: parsed.results || [] })
+          } else {
+            resolve({ ok: false, error: `HTTP ${res.statusCode}: ${(parsed.message || data).slice(0, 200)}` })
+          }
+        } catch {
+          resolve({ ok: false, error: `Failed to parse response: ${data.slice(0, 200)}` })
+        }
+      })
+    })
+    req.on('error', (e) => resolve({ ok: false, error: e.message }))
+    req.end()
+  })
+}
+
+/** OpenAlex stores abstracts as an inverted index — rebuild the text */
+function reconstructAbstract(invertedIndex) {
+  if (!invertedIndex) return null
+  const words = []
+  for (const [word, positions] of Object.entries(invertedIndex)) {
+    for (const pos of positions) words[pos] = word
+  }
+  return words.filter(Boolean).join(' ')
+}
+
+/** Map an OpenAlex work onto the paper shape used by paperToBibtex */
+function openAlexWorkToPaper(work) {
+  const doi = (work.doi || '').replace(/^https?:\/\/doi\.org\//i, '') || undefined
+  const arxivId = work.ids?.arxiv?.replace(/^https?:\/\/arxiv\.org\/abs\//i, '') || undefined
+  return {
+    title: work.display_name || '',
+    authors: (work.authorships || []).map((a) => ({ name: a.author?.display_name || '' })),
+    year: work.publication_year,
+    venue: work.primary_location?.source?.display_name || '',
+    citationCount: work.cited_by_count,
+    abstract: reconstructAbstract(work.abstract_inverted_index),
+    externalIds: { DOI: doi, ArXiv: arxivId }
+  }
+}
+
+/** Look up a paper on Semantic Scholar by DOI (authoritative BibTeX source) */
+function s2LookupByDoi(doi) {
+  return new Promise((resolve) => {
+    const fields = 'title,authors,year,externalIds,venue,citationCount,citationStyles'
+    const headers = { 'User-Agent': 'LatteX-MCP/1.0' }
+    const apiKey = getSemanticScholarApiKey()
+    if (apiKey) headers['x-api-key'] = apiKey
+    const options = {
+      hostname: 'api.semanticscholar.org',
+      path: `/graph/v1/paper/DOI:${encodeURIComponent(doi)}?fields=${fields}`,
+      method: 'GET',
+      headers
+    }
+    const req = https.request(options, (res) => {
+      let data = ''
+      res.on('data', (chunk) => (data += chunk))
+      res.on('end', () => {
+        try {
+          const parsed = JSON.parse(data)
+          if (res.statusCode >= 200 && res.statusCode < 300 && parsed.paperId) {
+            resolve({ ok: true, paper: parsed })
+          } else if (res.statusCode === 429) {
+            resolve({ ok: false, rateLimited: true })
+          } else {
+            resolve({ ok: false })
+          }
+        } catch {
+          resolve({ ok: false })
+        }
+      })
+    })
+    req.on('error', () => resolve({ ok: false }))
     req.end()
   })
 }
@@ -1091,6 +1212,81 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
         return textResult(
           `Found ${papers.length} paper(s) for "${query}":\n\n${entries.join('\n\n')}\n\nCopy the BibTeX entries you need into your .bib file.`
+        )
+      }
+
+      case 'search_openalex': {
+        const query = args.query
+        const limit = Math.min(args?.limit || 5, 8)
+
+        const searchResult = await openAlexSearch(query, limit)
+        if (!searchResult.ok) {
+          return errorResult(`OpenAlex search failed: ${searchResult.error}`)
+        }
+        if (searchResult.works.length === 0) {
+          return textResult(`No works found on OpenAlex for query: "${query}"`)
+        }
+
+        let s2RateLimited = false
+        const entries = []
+        for (let i = 0; i < searchResult.works.length; i++) {
+          const paper = openAlexWorkToPaper(searchResult.works[i])
+          const doi = paper.externalIds.DOI
+
+          // Cross-check against Semantic Scholar — its BibTeX is authoritative
+          let bibtex = null
+          let source = null
+          if (doi && !s2RateLimited) {
+            const s2 = await s2LookupByDoi(doi)
+            if (s2.ok) {
+              bibtex = s2.paper.citationStyles?.bibtex?.trim() || paperToBibtex(s2.paper)
+              source = 'BibTeX source: Semantic Scholar ✓ (authoritative)'
+            } else if (s2.rateLimited) {
+              s2RateLimited = true
+            }
+            // be polite to the shared unauthenticated pool
+            if (!getSemanticScholarApiKey()) await new Promise(r => setTimeout(r, 350))
+          }
+          // OpenAlex DOIs can point at mirrors/reprints — if the DOI lookup
+          // missed, try an exact-title match on Semantic Scholar instead
+          if (!bibtex && !s2RateLimited && paper.title) {
+            const titleSearch = await semanticScholarSearch(paper.title, 3)
+            if (titleSearch.ok) {
+              const match = titleSearch.papers.find(
+                (p) => (p.title || '').trim().toLowerCase() === paper.title.trim().toLowerCase()
+              )
+              if (match) {
+                bibtex = paperToBibtex(match)
+                source = 'BibTeX source: Semantic Scholar ✓ (matched by title — OpenAlex DOI may point at a mirror)'
+              }
+            } else if (/429/.test(titleSearch.error || '')) {
+              s2RateLimited = true
+            }
+            if (!getSemanticScholarApiKey()) await new Promise(r => setTimeout(r, 350))
+          }
+          if (!bibtex) {
+            bibtex = paperToBibtex(paper)
+            source = s2RateLimited && doi
+              ? 'BibTeX source: OpenAlex only ⚠ (Semantic Scholar rate-limited — retry later or add an API key in LatteX settings; verify before citing)'
+              : 'BibTeX source: OpenAlex only ⚠ (not found in Semantic Scholar — possibly too recent; VERIFY via web search / publisher page before citing)'
+          }
+
+          const cited = paper.citationCount != null ? ` (cited ${paper.citationCount}×)` : ''
+          const abs = paper.abstract
+            ? `\n${paper.abstract.length > 300 ? paper.abstract.slice(0, 300) + '...' : paper.abstract}\n`
+            : ''
+          entries.push(
+            `### ${i + 1}. ${paper.title}${cited}\n` +
+            `${paper.authors.map(a => a.name).filter(Boolean).join(', ') || 'Unknown authors'} — ${paper.venue || 'Unknown venue'}, ${paper.year || '?'}${doi ? `\nDOI: ${doi}` : ''}\n` +
+            `${source}\n${abs}\n\`\`\`bibtex\n${bibtex}\n\`\`\``
+          )
+        }
+
+        return textResult(
+          `Found ${entries.length} work(s) on OpenAlex for "${query}".\n` +
+          `Citation policy: entries marked "Semantic Scholar ✓" are safe to paste into your .bib file; ` +
+          `entries marked "OpenAlex only ⚠" must be verified with a web search before citing (OpenAlex lags and very recent papers may be missing from both indexes).\n\n` +
+          entries.join('\n\n')
         )
       }
 
