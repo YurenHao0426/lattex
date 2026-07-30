@@ -56,8 +56,16 @@ jobs:
 
       # npmRebuild=false: node-pty is already rebuilt for Electron above —
       # don't let electron-builder run its opaque rebuild again.
-      - name: Package and publish Windows installer
+      - name: Package Windows installer
         # quoted — pwsh otherwise splits the -c.npmRebuild token apart
-        run: npx electron-builder --win "-c.npmRebuild=false" --publish always
+        run: npx electron-builder --win "-c.npmRebuild=false" --publish never
+
+      # Upload directly — electron-builder's GitHub publisher refuses to
+      # attach assets to releases published more than 2 hours ago.
+      - name: Upload installer to the release
+        shell: pwsh
+        run: |
+          $version = node -p "require('./package.json').version"
+          gh release upload "v$version" "dist/lattex-$version-win-x64.exe" --clobber
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
