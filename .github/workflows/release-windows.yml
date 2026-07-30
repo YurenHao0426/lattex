@@ -14,7 +14,14 @@ permissions:
 
 jobs:
   windows:
-    runs-on: windows-latest
+    # windows-latest ships Visual Studio 2026 since 2026-06, which node-gyp
+    # cannot detect yet (nodejs/node-gyp#3250) — pin to the VS2022 image.
+    runs-on: windows-2022
+    # Native rebuild + packaging normally takes <10 min — fail fast on hangs
+    timeout-minutes: 25
+    env:
+      DEBUG: electron-builder
+      npm_config_loglevel: info
     steps:
       - uses: actions/checkout@v4
 
