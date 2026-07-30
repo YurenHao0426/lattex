@@ -2,7 +2,7 @@
 // Licensed under AGPL-3.0 - see LICENSE file
 
 // Manages temp directory for Overleaf socket-mode compilation
-import { join, basename } from 'path'
+import { join, basename, dirname, delimiter } from 'path'
 import { writeFile, mkdir, rm } from 'fs/promises'
 import { existsSync } from 'fs'
 import { spawn } from 'child_process'
@@ -42,7 +42,7 @@ export class CompilationManager {
     await mkdir(this.tmpDir, { recursive: true })
     for (const [relPath, content] of this.docContents) {
       const fullPath = join(this.tmpDir, relPath)
-      const dir = fullPath.substring(0, fullPath.lastIndexOf('/'))
+      const dir = dirname(fullPath)
       await mkdir(dir, { recursive: true })
       await writeFile(fullPath, content, 'utf-8')
     }
@@ -53,7 +53,7 @@ export class CompilationManager {
     if (this.fileRefCache.has(relativePath)) return
 
     const fullPath = join(this.tmpDir, relativePath)
-    const dir = fullPath.substring(0, fullPath.lastIndexOf('/'))
+    const dir = dirname(fullPath)
     await mkdir(dir, { recursive: true })
 
     return new Promise((resolve, reject) => {
@@ -99,17 +99,23 @@ export class CompilationManager {
   ): Promise<{ success: boolean; log: string; pdfPath: string }> {
     await this.syncDocs()
 
-    const texPaths = [
-      '/Library/TeX/texbin',
-      '/usr/local/texlive/2024/bin/universal-darwin',
-      '/usr/texbin',
-      '/opt/homebrew/bin'
-    ]
-    const envPath = texPaths.join(':') + ':' + (process.env.PATH || '')
+    const texPaths = process.platform === 'win32'
+      ? [
+          'C:\\texlive\\2025\\bin\\windows',
+          'C:\\texlive\\2024\\bin\\windows',
+          join(process.env.LOCALAPPDATA || '', 'Programs', 'MiKTeX', 'miktex', 'bin', 'x64')
+        ]
+      : [
+          '/Library/TeX/texbin',
+          '/usr/local/texlive/2024/bin/universal-darwin',
+          '/usr/texbin',
+          '/opt/homebrew/bin'
+        ]
+    const envPath = texPaths.join(delimiter) + delimiter + (process.env.PATH || '')
 
     // Use // suffix for recursive search of ALL subdirectories in the project tree.
     // This ensures .sty, .bst, .cls, images, etc. are always found regardless of nesting.
-    const texInputs = `${this.tmpDir}//:`
+    const texInputs = `${this.tmpDir}//${delimiter}`
     const texBase = basename(mainTexRelPath, '.tex')
     const pdfPath = join(this.tmpDir, texBase + '.pdf')
 

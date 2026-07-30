@@ -2,7 +2,8 @@
 // Licensed under AGPL-3.0 - see LICENSE file
 
 // Bidirectional file sync bridge: temp dir ↔ Overleaf via OT (text) + REST (binary)
-import { join, dirname } from 'path'
+import { join, dirname, relative, sep } from 'path'
+import { tmpdir } from 'os'
 import { existsSync } from 'fs'
 import { readFile, writeFile, mkdir, unlink, rename as fsRename, appendFile, readdir, rm } from 'fs/promises'
 import { createHash } from 'crypto'
@@ -16,7 +17,7 @@ import type { OtOp } from './otTypes'
 import { isInsert, isDelete } from './otTypes'
 
 const dmp = new diff_match_patch()
-const LOG_FILE = '/tmp/lattex-bridge.log'
+const LOG_FILE = join(tmpdir(), 'lattex-bridge.log')
 function bridgeLog(msg: string, ...rest: unknown[]) {
   const line = `[${new Date().toISOString()}] ${msg}${rest.length ? ' ' + rest.map(String).join(' ') : ''}`
   console.log(line)
@@ -225,7 +226,7 @@ export class FileSyncBridge {
     }, 60_000)
 
     this.watcher.on('change', (absPath: string) => {
-      const relPath = absPath.replace(this.tmpDir + '/', '')
+      const relPath = this.relFromAbs(absPath)
       bridgeLog(`[FileSyncBridge] chokidar change: ${relPath}`)
       // A real fs event means new content — give parked failures a fresh chance
       this.permanentFailures.delete(relPath)
@@ -237,7 +238,7 @@ export class FileSyncBridge {
     })
 
     this.watcher.on('add', (absPath: string) => {
-      const relPath = absPath.replace(this.tmpDir + '/', '')
+      const relPath = this.relFromAbs(absPath)
       bridgeLog(`[FileSyncBridge] chokidar add: ${relPath}`)
       this.permanentFailures.delete(relPath)
       if (this.pathDocMap[relPath] || this.pathFileRefMap[relPath]) {
@@ -250,7 +251,7 @@ export class FileSyncBridge {
     })
 
     this.watcher.on('unlink', (absPath: string) => {
-      const relPath = absPath.replace(this.tmpDir + '/', '')
+      const relPath = this.relFromAbs(absPath)
       bridgeLog(`[FileSyncBridge] chokidar unlink: ${relPath}`)
     })
 
@@ -1476,6 +1477,12 @@ export class FileSyncBridge {
       // Keep in pendingCreates briefly to avoid processing the echoed server event
       this.expirePendingCreate(relPath)
     }
+  }
+
+  /** Absolute watcher path → project-relative path with forward slashes
+      (Windows watcher events use backslashes; all maps are '/'-keyed) */
+  private relFromAbs(absPath: string): string {
+    return relative(this.tmpDir, absPath).split(sep).join('/')
   }
 
   // ── Compile-artifact detection ───────────────────────────────

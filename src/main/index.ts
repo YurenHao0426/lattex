@@ -2,7 +2,7 @@
 // Licensed under AGPL-3.0 - see LICENSE file
 
 import { app, BrowserWindow, ipcMain, dialog, shell, net } from 'electron'
-import { join, basename, dirname, relative, extname } from 'path'
+import { join, basename, dirname, relative, extname, delimiter } from 'path'
 import { copyFile, readFile, writeFile, mkdir as mkdirAsync, unlink, readdir, stat, rename as fsRename, rm, cp } from 'fs/promises'
 import { existsSync } from 'fs'
 import { spawn } from 'child_process'
@@ -125,8 +125,11 @@ function createWindow(): void {
     height: 900,
     minWidth: 900,
     minHeight: 600,
-    titleBarStyle: 'hiddenInset',
-    trafficLightPosition: { x: 15, y: 15 },
+    // Frameless inset title bar is a macOS affordance; use the native
+    // frame elsewhere
+    ...(process.platform === 'darwin'
+      ? { titleBarStyle: 'hiddenInset' as const, trafficLightPosition: { x: 15, y: 15 } }
+      : {}),
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
       sandbox: false,
@@ -255,19 +258,25 @@ ipcMain.handle('settings:setApiKeys', async (_e, keys: Record<string, string>) =
 
 // ── LaTeX Compilation ────────────────────────────────────────────
 
-// Ensure TeX binaries are in PATH (Electron launched from Finder may miss them)
-const texPaths = ['/Library/TeX/texbin', '/usr/local/texlive/2024/bin/universal-darwin', '/usr/texbin', '/opt/homebrew/bin']
+// Ensure TeX binaries are in PATH (GUI-launched apps may miss them)
+const texPaths = process.platform === 'win32'
+  ? [
+      'C:\\texlive\\2025\\bin\\windows',
+      'C:\\texlive\\2024\\bin\\windows',
+      join(process.env.LOCALAPPDATA || '', 'Programs', 'MiKTeX', 'miktex', 'bin', 'x64')
+    ]
+  : ['/Library/TeX/texbin', '/usr/local/texlive/2024/bin/universal-darwin', '/usr/texbin', '/opt/homebrew/bin']
 const currentPath = process.env.PATH || ''
 for (const p of texPaths) {
   if (!currentPath.includes(p)) {
-    process.env.PATH = `${p}:${process.env.PATH}`
+    process.env.PATH = `${p}${delimiter}${process.env.PATH}`
   }
 }
 
 // SyncTeX: PDF position → source file:line (inverse search)
 ipcMain.handle('synctex:editFromPdf', async (_e, pdfPath: string, page: number, x: number, y: number) => {
   return new Promise<{ file: string; line: number } | null>((resolve) => {
-    const pdfDir = pdfPath.substring(0, pdfPath.lastIndexOf('/'))
+    const pdfDir = dirname(pdfPath)
     console.log(`[synctex] edit -o ${page}:${x}:${y}:${pdfPath} (cwd: ${pdfDir})`)
     const proc = spawn('synctex', ['edit', '-o', `${page}:${x}:${y}:${pdfPath}`], {
       env: process.env,
@@ -418,8 +427,10 @@ ipcMain.handle('pty:spawn', async (_e, id: string, cwd: string, cmd?: string, ar
     ptyInstances.delete(id)
   }
 
-  const shellPath = cmd || process.env.SHELL || '/bin/zsh'
-  const shellArgs = args || ['-l']
+  const shellPath = cmd || (process.platform === 'win32'
+    ? process.env.COMSPEC || 'powershell.exe'
+    : process.env.SHELL || '/bin/zsh')
+  const shellArgs = args || (process.platform === 'win32' ? [] : ['-l'])
   const ptyEnv: Record<string, string> = {
     ...(process.env as Record<string, string>),
     TERM: 'xterm-256color',

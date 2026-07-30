@@ -30,8 +30,9 @@ Download the latest `.dmg` from [Releases](https://github.com/YurenHao0426/latte
 
 ### Requirements
 
-- macOS (Apple Silicon)
-- [TeX Live](https://www.tug.org/texlive/) or [MacTeX](https://www.tug.org/mactex/) for local compilation
+- macOS (Apple Silicon) — primary platform
+- Windows 10+ (x64) — experimental installer built by CI (`lattex-*-win-x64.exe`); expects [TeX Live](https://www.tug.org/texlive/) or [MiKTeX](https://miktex.org/) for local compilation
+- [TeX Live](https://www.tug.org/texlive/) or [MacTeX](https://www.tug.org/mactex/) for local compilation on macOS
 
 ## Recommended: Claude Code
 

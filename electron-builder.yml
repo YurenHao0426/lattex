@@ -34,3 +34,13 @@ mac:
     - dmg
   category: public.app-category.productivity
   artifactName: ${name}-${version}-${arch}.${ext}
+win:
+  icon: resources/icon.png
+  target:
+    - nsis
+  artifactName: ${name}-${version}-win-${arch}.${ext}
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+publish:
+  provider: github
