@@ -44,3 +44,5 @@ nsis:
   allowToChangeInstallationDirectory: true
 publish:
   provider: github
+  # attach assets to the existing published release instead of a new draft
+  releaseType: release
