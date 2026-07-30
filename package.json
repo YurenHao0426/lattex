@@ -35,6 +35,9 @@
     "ws": "^8.19.0",
     "zustand": "^5.0.0"
   },
+  "overrides": {
+    "node-gyp": "^11.0.0"
+  },
   "devDependencies": {
     "@types/diff-match-patch": "^1.0.36",
     "@types/katex": "^0.16.8",
