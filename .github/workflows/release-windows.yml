@@ -29,16 +29,34 @@ jobs:
         with:
           node-version: 20
 
-      # node-gyp is pinned to ^11 via package.json "overrides" — the v9 the
-      # tree would otherwise hoist cannot detect VS2022 on current runners
-      # (and @electron/rebuild requires the in-tree node-gyp directly).
-      - name: Install dependencies
-        run: npm ci
+      # Lifecycle scripts are skipped: electron-builder's install-app-deps
+      # (our postinstall) rebuilds node-pty through @electron/rebuild, which
+      # swallows child output and has hung indefinitely on Windows runners.
+      # The rebuild is done as an explicit, verbose, time-boxed step instead.
+      - name: Install dependencies (skip lifecycle scripts)
+        run: npm ci --ignore-scripts
+
+      - name: Install esbuild platform binary
+        run: npm rebuild esbuild
 
       - name: Build
         run: npm run build
 
+      - name: Detect Electron version
+        shell: pwsh
+        run: |
+          "ELECTRON_VERSION=$(node -p `"require('electron/package.json').version`")" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Rebuild node-pty for Electron (verbose)
+        working-directory: node_modules/node-pty
+        timeout-minutes: 10
+        shell: pwsh
+        run: |
+          npx node-gyp rebuild --target=$env:ELECTRON_VERSION --arch=x64 --dist-url=https://electronjs.org/headers --loglevel=verbose
+
+      # npmRebuild=false: node-pty is already rebuilt for Electron above —
+      # don't let electron-builder run its opaque rebuild again.
       - name: Package and publish Windows installer
-        run: npx electron-builder --win --publish always
+        run: npx electron-builder --win -c.npmRebuild=false --publish always
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
