@@ -1,7 +1,7 @@
 // Copyright (c) 2026 Yuren Hao
 // Licensed under AGPL-3.0 - see LICENSE file
 
-import { app, BrowserWindow, ipcMain, dialog, shell, net } from 'electron'
+import { app, BrowserWindow, WebContentsView, ipcMain, dialog, shell, net } from 'electron'
 import { join, basename, dirname, relative, extname, delimiter } from 'path'
 import { copyFile, readFile, writeFile, mkdir as mkdirAsync, unlink, readdir, stat, rename as fsRename, rm, cp } from 'fs/promises'
 import { existsSync } from 'fs'
@@ -15,20 +15,62 @@ import { FileSyncBridge } from './fileSyncBridge'
 process.stdout?.on('error', () => {})
 process.stderr?.on('error', () => {})
 
-let mainWindow: BrowserWindow | null = null
+let mainWindow: BrowserWindow | null = null   // persistent project-list window
+// PTYs are per-window: keyed by `${webContents.id}:${terminalId}` so two
+// project windows can both have a "term-1" without clobbering each other.
 const ptyInstances = new Map<string, pty.IPty>()
-let overleafSock: OverleafSocket | null = null
-let compilationManager: CompilationManager | null = null
-let fileSyncBridge: FileSyncBridge | null = null
-let mcpStateDir = ''           // syncDir for .lattex-mcp.json
-let mcpProjectId = ''
-let mcpCommentContexts: Record<string, { file: string; text: string; pos: number }> = {}
-let mcpPathDocMap: Record<string, string> = {}  // relPath → docId for MCP
-const mcpOnlineUsers = new Map<string, { name: string; email?: string }>()
-let mcpOnlineUsersWriteTimer: ReturnType<typeof setTimeout> | null = null
 
-async function writeMcpState(): Promise<void> {
-  if (!mcpStateDir || !mcpProjectId) return
+/**
+ * All per-project state, one instance per open project tab. Each tab is a
+ * WebContentsView with its own webContents, whose id is the session key:
+ * every IPC call from a project tab resolves its own session via event.sender.
+ */
+interface ProjectSession {
+  projectId: string
+  contents: Electron.WebContents
+  webContentsId: number
+  sock: OverleafSocket
+  compilationManager: CompilationManager
+  fileSyncBridge: FileSyncBridge | null
+  /** per-doc otUpdateApplied relays, for cleanup on leaveDoc */
+  docEventHandlers: Map<string, (name: string, args: unknown[]) => void>
+  mcpStateDir: string
+  mcpCommentContexts: Record<string, { file: string; text: string; pos: number }>
+  mcpPathDocMap: Record<string, string>
+  mcpOnlineUsers: Map<string, { name: string; email?: string }>
+  mcpOnlineUsersWriteTimer: ReturnType<typeof setTimeout> | null
+  commentContextRefreshTimer: ReturnType<typeof setTimeout> | null
+  mcpCompileRequestPath: string | null
+  mcpCompileActive: boolean
+  compileInProgress: Promise<{ success: boolean; log: string; pdfPath: string }> | null
+}
+
+const sessions = new Map<number, ProjectSession>()          // webContents.id → session
+const sessionsByProject = new Map<string, ProjectSession>() // projectId → session
+
+function getSession(e: Electron.IpcMainInvokeEvent): ProjectSession | undefined {
+  return sessions.get(e.sender.id)
+}
+
+/** Send IPC to one session's tab — no-op if its webContents is gone */
+function sessionSend(s: ProjectSession, channel: string, ...args: unknown[]) {
+  if (!s.contents.isDestroyed()) {
+    s.contents.send(channel, ...args)
+  }
+}
+
+/** Send IPC to the home renderer and every project tab */
+function broadcast(channel: string, ...args: unknown[]) {
+  if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.webContents.isDestroyed()) {
+    mainWindow.webContents.send(channel, ...args)
+  }
+  for (const s of sessions.values()) {
+    if (!s.contents.isDestroyed()) s.contents.send(channel, ...args)
+  }
+}
+
+async function writeMcpState(s: ProjectSession): Promise<void> {
+  if (!s.mcpStateDir || !s.projectId) return
   try {
     // Read S2 API key if available
     let s2Key: string | undefined
@@ -37,14 +79,14 @@ async function writeMcpState(): Promise<void> {
       if (keys.semanticScholar) s2Key = keys.semanticScholar
     } catch { /* ignore */ }
     const state: Record<string, unknown> = {
-      projectId: mcpProjectId,
+      projectId: s.projectId,
       cookie: overleafSessionCookie,
       csrf: overleafCsrfToken,
-      commentContexts: mcpCommentContexts,
-      pathDocMap: mcpPathDocMap
+      commentContexts: s.mcpCommentContexts,
+      pathDocMap: s.mcpPathDocMap
     }
     if (s2Key) state.semanticScholarApiKey = s2Key
-    await writeFile(join(mcpStateDir, '.lattex-mcp.json'), JSON.stringify(state, null, 2))
+    await writeFile(join(s.mcpStateDir, '.lattex-mcp.json'), JSON.stringify(state, null, 2))
   } catch { /* ignore */ }
 }
 
@@ -85,17 +127,16 @@ async function clearDisabledLattexMcpServer(tmpDir: string): Promise<void> {
   }
 }
 
-let commentContextRefreshTimer: ReturnType<typeof setTimeout> | null = null
-function scheduleCommentContextRefresh(): void {
-  if (commentContextRefreshTimer) clearTimeout(commentContextRefreshTimer)
-  commentContextRefreshTimer = setTimeout(async () => {
-    commentContextRefreshTimer = null
-    if (!overleafSock?.projectData) return
-    const { docPathMap: dp } = walkRootFolder(overleafSock.projectData.project.rootFolder)
+function scheduleCommentContextRefresh(s: ProjectSession): void {
+  if (s.commentContextRefreshTimer) clearTimeout(s.commentContextRefreshTimer)
+  s.commentContextRefreshTimer = setTimeout(async () => {
+    s.commentContextRefreshTimer = null
+    if (!s.sock.projectData) return
+    const { docPathMap: dp } = walkRootFolder(s.sock.projectData.project.rootFolder)
     const contexts: Record<string, { file: string; text: string; pos: number }> = {}
     for (const [did, rp] of Object.entries(dp)) {
       try {
-        const result = await overleafSock.joinDoc(did)
+        const result = await s.sock.joinDoc(did)
         if (result.ranges?.comments) {
           for (const c of result.ranges.comments) {
             if (c.op?.t) contexts[c.op.t] = { file: rp, text: c.op.c || '', pos: c.op.p || 0 }
@@ -104,23 +145,23 @@ function scheduleCommentContextRefresh(): void {
         // Don't leaveDoc — bridge keeps all docs joined
       } catch { /* ignore */ }
     }
-    mcpCommentContexts = contexts
-    writeMcpState()
-    sendToRenderer('comments:initContexts', { contexts })
+    s.mcpCommentContexts = contexts
+    writeMcpState(s)
+    sessionSend(s, 'comments:initContexts', { contexts })
   }, 2000) // 2s debounce
 }
 
-function writeMcpOnlineUsers(): void {
-  if (!mcpStateDir) return
-  if (mcpOnlineUsersWriteTimer) clearTimeout(mcpOnlineUsersWriteTimer)
-  mcpOnlineUsersWriteTimer = setTimeout(() => {
-    const users = Array.from(mcpOnlineUsers.entries()).map(([id, u]) => ({ id, ...u }))
-    writeFile(join(mcpStateDir, '.lattex-online-users.json'), JSON.stringify(users)).catch(() => {})
+function writeMcpOnlineUsers(s: ProjectSession): void {
+  if (!s.mcpStateDir) return
+  if (s.mcpOnlineUsersWriteTimer) clearTimeout(s.mcpOnlineUsersWriteTimer)
+  s.mcpOnlineUsersWriteTimer = setTimeout(() => {
+    const users = Array.from(s.mcpOnlineUsers.entries()).map(([id, u]) => ({ id, ...u }))
+    writeFile(join(s.mcpStateDir, '.lattex-online-users.json'), JSON.stringify(users)).catch(() => {})
   }, 500)
 }
 
-function createWindow(): void {
-  mainWindow = new BrowserWindow({
+function createListWindow(): void {
+  const win = new BrowserWindow({
     width: 1400,
     height: 900,
     minWidth: 900,
@@ -138,21 +179,206 @@ function createWindow(): void {
   })
 
   // Disable Electron's built-in pinch/Ctrl+wheel zoom so editor can handle it
-  mainWindow.webContents.setVisualZoomLevelLimits(1, 1)
+  win.webContents.setVisualZoomLevelLimits(1, 1)
 
   if (process.env['ELECTRON_RENDERER_URL']) {
-    mainWindow.loadURL(process.env['ELECTRON_RENDERER_URL'])
+    win.loadURL(process.env['ELECTRON_RENDERER_URL'])
   } else {
-    mainWindow.loadFile(join(__dirname, '../renderer/index.html'))
+    win.loadFile(join(__dirname, '../renderer/index.html'))
+  }
+
+  win.on('resize', layoutTabs)
+  win.on('enter-full-screen', layoutTabs)
+  win.on('leave-full-screen', layoutTabs)
+
+  const wcId = win.webContents.id
+  win.on('closed', () => {
+    // Child views' webContents are destroyed with the window; their
+    // 'destroyed' handlers tear the sessions down
+    projectTabs.length = 0
+    activeTabId = 'home'
+    for (const [key, inst] of ptyInstances) {
+      if (key.startsWith(`${wcId}:`)) {
+        inst.kill()
+        ptyInstances.delete(key)
+      }
+    }
+    mainWindow = null
+  })
+
+  mainWindow = win
+}
+
+// Per-project teardown chain. Sessions of the same project share a sync dir
+// (os.tmpdir()/lattex-<projectId>), so a new ot:connect must wait for the
+// previous session's async teardown (bridge stop + rm -rf) to finish before
+// it starts writing into that dir again.
+const projectTeardowns = new Map<string, Promise<void>>()
+
+/** Tear down everything a project window owned. Idempotent. */
+function destroySession(s: ProjectSession): Promise<void> {
+  if (sessions.get(s.webContentsId) !== s) {
+    return projectTeardowns.get(s.projectId) ?? Promise.resolve()
+  }
+  sessions.delete(s.webContentsId)
+  if (sessionsByProject.get(s.projectId) === s) sessionsByProject.delete(s.projectId)
+
+  stopMcpCompileWatcher(s)
+  if (s.commentContextRefreshTimer) clearTimeout(s.commentContextRefreshTimer)
+  if (s.mcpOnlineUsersWriteTimer) clearTimeout(s.mcpOnlineUsersWriteTimer)
+  if (s.mcpStateDir) {
+    unlink(join(s.mcpStateDir, '.lattex-mcp.json')).catch(() => {})
+    unlink(join(s.mcpStateDir, '.lattex-online-users.json')).catch(() => {})
+  }
+
+  const work = (async () => {
+    try { await s.fileSyncBridge?.stop() } catch { /* ignore */ }
+    s.fileSyncBridge = null
+    try { s.sock.disconnect() } catch { /* ignore */ }
+    try { await s.compilationManager.cleanup() } catch { /* ignore */ }
+  })()
+  const prev = projectTeardowns.get(s.projectId) ?? Promise.resolve()
+  const chained = prev.then(() => work, () => work)
+  projectTeardowns.set(s.projectId, chained.catch(() => {}))
+  return chained
+}
+
+// ── Project tabs (browser-tab model inside the main window) ─────
+//
+// The home renderer (project list) fills the window and draws the tab bar in
+// its top TAB_BAR_HEIGHT pixels. Each open project is a WebContentsView laid
+// out below the tab bar; inactive tabs stay alive (sync keeps running) but
+// hidden. Tab strip state is mirrored to the home renderer via 'tabs:changed'.
+
+const TAB_BAR_HEIGHT = 38
+
+interface ProjectTab {
+  projectId: string
+  view: WebContentsView
+  title: string
+}
+
+const projectTabs: ProjectTab[] = []
+let activeTabId = 'home' // 'home' or a projectId
+
+function tabsState() {
+  return {
+    tabs: projectTabs.map((t) => ({ id: t.projectId, title: t.title })),
+    active: activeTabId
   }
 }
 
-/** Safely send IPC to renderer — no-op if window is gone */
-function sendToRenderer(channel: string, ...args: unknown[]) {
+function broadcastTabs(): void {
   if (mainWindow && !mainWindow.isDestroyed()) {
-    mainWindow.webContents.send(channel, ...args)
+    mainWindow.webContents.send('tabs:changed', tabsState())
   }
 }
+
+function layoutTabs(): void {
+  if (!mainWindow || mainWindow.isDestroyed()) return
+  const { width, height } = mainWindow.getContentBounds()
+  for (const t of projectTabs) {
+    const active = t.projectId === activeTabId
+    t.view.setVisible(active)
+    if (active) {
+      t.view.setBounds({ x: 0, y: TAB_BAR_HEIGHT, width, height: Math.max(0, height - TAB_BAR_HEIGHT) })
+    }
+  }
+}
+
+function activateTab(id: string): void {
+  activeTabId = projectTabs.some((t) => t.projectId === id) ? id : 'home'
+  layoutTabs()
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    if (activeTabId === 'home') mainWindow.webContents.focus()
+    else projectTabs.find((t) => t.projectId === activeTabId)?.view.webContents.focus()
+  }
+  broadcastTabs()
+}
+
+function closeTab(projectId: string): void {
+  const idx = projectTabs.findIndex((t) => t.projectId === projectId)
+  if (idx === -1) return
+  const [tab] = projectTabs.splice(idx, 1)
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.contentView.removeChildView(tab.view)
+  }
+  const wc = tab.view.webContents
+  // 'destroyed' handler (set at creation) tears down the session + PTYs
+  if (!wc.isDestroyed()) wc.close()
+  if (activeTabId === projectId) {
+    // Browser behavior: closing the active tab activates a neighbor
+    const next = projectTabs[idx] ?? projectTabs[idx - 1]
+    activateTab(next ? next.projectId : 'home')
+  } else {
+    broadcastTabs()
+  }
+}
+
+/** Open a project in a tab; activate the existing tab if already open */
+ipcMain.handle('project:openTab', async (_e, projectId: string, name?: string) => {
+  if (projectTabs.some((t) => t.projectId === projectId)) {
+    activateTab(projectId)
+    return { success: true, focusedExisting: true }
+  }
+  if (!mainWindow || mainWindow.isDestroyed()) return { success: false }
+
+  const view = new WebContentsView({
+    webPreferences: {
+      preload: join(__dirname, '../preload/index.js'),
+      sandbox: false,
+      contextIsolation: true
+    }
+  })
+  view.setBackgroundColor('#FFF8E7')
+  view.webContents.setVisualZoomLevelLimits(1, 1)
+
+  const wcId = view.webContents.id
+  view.webContents.on('destroyed', () => {
+    const s = sessions.get(wcId)
+    if (s) destroySession(s)
+    for (const [key, inst] of ptyInstances) {
+      if (key.startsWith(`${wcId}:`)) {
+        inst.kill()
+        ptyInstances.delete(key)
+      }
+    }
+  })
+
+  // The tab's renderer sets document.title to the project name on connect
+  view.webContents.on('page-title-updated', (_ev, title) => {
+    const t = projectTabs.find((tab) => tab.projectId === projectId)
+    if (t && title && title !== 'LatteX') {
+      t.title = title.replace(/ — LatteX$/, '')
+      broadcastTabs()
+    }
+  })
+
+  if (process.env['ELECTRON_RENDERER_URL']) {
+    view.webContents.loadURL(`${process.env['ELECTRON_RENDERER_URL']}?projectId=${encodeURIComponent(projectId)}`)
+  } else {
+    view.webContents.loadFile(join(__dirname, '../renderer/index.html'), { query: { projectId } })
+  }
+
+  mainWindow.contentView.addChildView(view)
+  projectTabs.push({ projectId, view, title: name || 'Project' })
+  activateTab(projectId)
+  return { success: true }
+})
+
+ipcMain.handle('tabs:list', async () => tabsState())
+ipcMain.handle('tabs:activate', async (_e, id: string) => activateTab(id))
+ipcMain.handle('tabs:close', async (_e, id: string) => closeTab(id))
+
+// From inside a project tab, "close" closes the tab; from a window, the window
+ipcMain.handle('window:close', async (e) => {
+  const tab = projectTabs.find((t) => t.view.webContents.id === e.sender.id)
+  if (tab) {
+    closeTab(tab.projectId)
+    return
+  }
+  BrowserWindow.fromWebContents(e.sender)?.close()
+})
 
 
 ipcMain.handle('fs:readFile', async (_e, filePath: string) => {
@@ -274,7 +500,8 @@ for (const p of texPaths) {
 }
 
 // SyncTeX: PDF position → source file:line (inverse search)
-ipcMain.handle('synctex:editFromPdf', async (_e, pdfPath: string, page: number, x: number, y: number) => {
+ipcMain.handle('synctex:editFromPdf', async (e, pdfPath: string, page: number, x: number, y: number) => {
+  const session = getSession(e)
   return new Promise<{ file: string; line: number } | null>((resolve) => {
     const pdfDir = dirname(pdfPath)
     console.log(`[synctex] edit -o ${page}:${x}:${y}:${pdfPath} (cwd: ${pdfDir})`)
@@ -298,7 +525,7 @@ ipcMain.handle('synctex:editFromPdf', async (_e, pdfPath: string, page: number, 
           filePath = filePath.slice('/compile/'.length)
         }
         // Convert absolute path to relative (strip tmpDir prefix for local compile)
-        const syncDir = compilationManager?.dir
+        const syncDir = session?.compilationManager.dir
         if (syncDir && filePath.startsWith(syncDir)) {
           filePath = filePath.slice(syncDir.length).replace(/^\//, '')
         }
@@ -319,8 +546,8 @@ ipcMain.handle('synctex:editFromPdf', async (_e, pdfPath: string, page: number, 
 })
 
 // SyncTeX: source file:line → PDF page/position (forward search)
-ipcMain.handle('synctex:viewFromSource', async (_e, line: number, col: number, relPath: string) => {
-  const syncDir = compilationManager?.dir
+ipcMain.handle('synctex:viewFromSource', async (e, line: number, col: number, relPath: string) => {
+  const syncDir = getSession(e)?.compilationManager.dir
   if (!syncDir) return null
   // Look for build dir output.pdf
   const buildDir = join(syncDir, '.build')
@@ -386,8 +613,8 @@ async function walkDir(dir: string, base: string): Promise<string[]> {
   return results
 }
 
-ipcMain.handle('search:files', async (_e, query: string, caseSensitive: boolean) => {
-  const syncDir = compilationManager?.dir
+ipcMain.handle('search:files', async (e, query: string, caseSensitive: boolean) => {
+  const syncDir = getSession(e)?.compilationManager.dir
   if (!syncDir || !query) return []
 
   const files = await walkDir(syncDir, syncDir)
@@ -420,11 +647,13 @@ ipcMain.handle('search:files', async (_e, query: string, caseSensitive: boolean)
 
 // ── Terminal / PTY ───────────────────────────────────────────────
 
-ipcMain.handle('pty:spawn', async (_e, id: string, cwd: string, cmd?: string, args?: string[]) => {
-  const existing = ptyInstances.get(id)
+ipcMain.handle('pty:spawn', async (e, id: string, cwd: string, cmd?: string, args?: string[]) => {
+  const sender = e.sender
+  const key = `${sender.id}:${id}`
+  const existing = ptyInstances.get(key)
   if (existing) {
     existing.kill()
-    ptyInstances.delete(id)
+    ptyInstances.delete(key)
   }
 
   const shellPath = cmd || (process.platform === 'win32'
@@ -446,39 +675,40 @@ ipcMain.handle('pty:spawn', async (_e, id: string, cwd: string, cmd?: string, ar
     env: ptyEnv
   })
 
-  ptyInstances.set(id, instance)
+  ptyInstances.set(key, instance)
 
   instance.onData((data) => {
     // Strip DEC 2026 synchronized output sequences — xterm.js may buffer indefinitely
     // if the begin/end markers are split across PTY chunks
     const cleaned = data.replace(/\x1b\[\?2026[hl]/g, '')
-    if (cleaned) sendToRenderer(`pty:data:${id}`, cleaned)
+    if (cleaned && !sender.isDestroyed()) sender.send(`pty:data:${id}`, cleaned)
   })
 
   instance.onExit(() => {
     // Only delete if this is still the current instance (avoid race with re-spawn)
-    if (ptyInstances.get(id) === instance) {
-      sendToRenderer(`pty:exit:${id}`)
-      ptyInstances.delete(id)
+    if (ptyInstances.get(key) === instance) {
+      if (!sender.isDestroyed()) sender.send(`pty:exit:${id}`)
+      ptyInstances.delete(key)
     }
   })
 })
 
-ipcMain.handle('pty:write', async (_e, id: string, data: string) => {
-  ptyInstances.get(id)?.write(data)
+ipcMain.handle('pty:write', async (e, id: string, data: string) => {
+  ptyInstances.get(`${e.sender.id}:${id}`)?.write(data)
 })
 
-ipcMain.handle('pty:resize', async (_e, id: string, cols: number, rows: number) => {
+ipcMain.handle('pty:resize', async (e, id: string, cols: number, rows: number) => {
   try {
-    ptyInstances.get(id)?.resize(cols, rows)
+    ptyInstances.get(`${e.sender.id}:${id}`)?.resize(cols, rows)
   } catch { /* ignore resize errors */ }
 })
 
-ipcMain.handle('pty:kill', async (_e, id: string) => {
-  const instance = ptyInstances.get(id)
+ipcMain.handle('pty:kill', async (e, id: string) => {
+  const key = `${e.sender.id}:${id}`
+  const instance = ptyInstances.get(key)
   if (instance) {
     instance.kill()
-    ptyInstances.delete(id)
+    ptyInstances.delete(key)
   }
 })
 
@@ -536,7 +766,7 @@ function refreshCsrfToken(): Promise<boolean> {
       const session = await overleafFetchRaw('/user/projects')
       if (!session.ok || typeof session.data !== 'object' || session.data === null) {
         console.log('[overleaf] session expired — cannot refresh CSRF token')
-        sendToRenderer('auth:sessionExpired')
+        broadcast('auth:sessionExpired')
         return false
       }
       const result = await overleafFetchRaw('/project', { raw: true })
@@ -607,13 +837,15 @@ async function overleafFetchRaw(path: string, options: { method?: string; body?:
 }
 
 // Login via webview — opens Overleaf login page, captures session cookie
-ipcMain.handle('overleaf:webLogin', async () => {
+ipcMain.handle('overleaf:webLogin', async (e) => {
+  // Sender may be a tab's WebContentsView (no owning BrowserWindow mapping)
+  const parent = BrowserWindow.fromWebContents(e.sender) || mainWindow || undefined
   return new Promise<{ success: boolean }>((resolve) => {
     const loginWindow = new BrowserWindow({
       width: 900,
       height: 750,
-      parent: mainWindow!,
-      modal: true,
+      parent,
+      modal: !!parent,
       webPreferences: { nodeIntegration: false, contextIsolation: true }
     })
 
@@ -699,8 +931,10 @@ ipcMain.handle('overleaf:webLogin', async () => {
       if (ok && !resolved) {
         resolved = true
         saveOverleafSession()
-        // Push fresh credentials into a live sync bridge (re-login mid-session)
-        fileSyncBridge?.updateAuth(overleafSessionCookie, overleafCsrfToken)
+        // Push fresh credentials into all live sync bridges (re-login mid-session)
+        for (const s of sessions.values()) {
+          s.fileSyncBridge?.updateAuth(overleafSessionCookie, overleafCsrfToken)
+        }
         loginWindow.close()
         resolve({ success: true })
       }
@@ -719,6 +953,17 @@ ipcMain.handle('overleaf:webLogin', async () => {
 ipcMain.handle('overleaf:hasWebSession', async () => {
   if (sessionLoadPromise) await sessionLoadPromise
   return { loggedIn: !!overleafSessionCookie }
+})
+
+// Sign out: drop stored credentials and close every project tab (each tab's
+// 'destroyed' handler tears its session down)
+ipcMain.handle('overleaf:logout', async () => {
+  overleafSessionCookie = ''
+  overleafCsrfToken = ''
+  await saveOverleafSession()
+  for (const t of [...projectTabs]) {
+    closeTab(t.projectId)
+  }
 })
 
 // Fetch all comment threads for a project
@@ -794,6 +1039,7 @@ ipcMain.handle('overleaf:deleteThread', async (_e, projectId: string, docId: str
 
 // Add a new comment: create thread via REST then submit comment op via existing socket
 async function addComment(
+  s: ProjectSession,
   projectId: string,
   docId: string,
   pos: number,
@@ -801,7 +1047,6 @@ async function addComment(
   content: string
 ): Promise<{ success: boolean; threadId?: string; message?: string }> {
   if (!overleafSessionCookie) return { success: false, message: 'not_logged_in' }
-  if (!overleafSock) return { success: false, message: 'not_connected' }
 
   // Generate a random threadId (24-char hex like Mongo ObjectId)
   const threadId = Array.from({ length: 24 }, () => Math.floor(Math.random() * 16).toString(16)).join('')
@@ -816,20 +1061,20 @@ async function addComment(
   // Step 2: Submit the comment op via the existing socket connection
   try {
     // Join doc if not already joined, to get the current version
-    const alreadyJoined = docEventHandlers.has(docId)
-    const joinResult = await overleafSock.joinDoc(docId)
+    const alreadyJoined = s.docEventHandlers.has(docId)
+    const joinResult = await s.sock.joinDoc(docId)
     const version = joinResult.version
 
     // Send the comment op
     const commentOp = { c: text, p: pos, t: threadId }
     console.log('[addComment] submitting op:', JSON.stringify(commentOp), 'v:', version)
 
-    await overleafSock.applyOtUpdate(docId, [commentOp], version, '')
+    await s.sock.applyOtUpdate(docId, [commentOp], version, '')
     console.log('[addComment] op applied successfully')
 
     // Leave doc if we joined it just for this
     if (!alreadyJoined) {
-      await overleafSock.leaveDoc(docId)
+      await s.sock.leaveDoc(docId)
     }
 
     return { success: true, threadId }
@@ -839,8 +1084,10 @@ async function addComment(
   }
 }
 
-ipcMain.handle('overleaf:addComment', async (_e, projectId: string, docId: string, pos: number, text: string, content: string) => {
-  return addComment(projectId, docId, pos, text, content)
+ipcMain.handle('overleaf:addComment', async (e, projectId: string, docId: string, pos: number, text: string, content: string) => {
+  const s = getSession(e)
+  if (!s) return { success: false, message: 'not_connected' }
+  return addComment(s, projectId, docId, pos, text, content)
 })
 
 // ── OT / Socket Mode IPC ─────────────────────────────────────────
@@ -916,33 +1163,99 @@ function walkRootFolder(folders: RootFolder[]): {
   return { files, docPathMap, pathDocMap, fileRefs, rootFolderId }
 }
 
-ipcMain.handle('ot:connect', async (_e, projectId: string) => {
+// One connect at a time per window: React StrictMode double-fires the
+// renderer's auto-connect effect, and a reload can re-request while the
+// first connect is still in flight — both get the same promise.
+const connectsInFlight = new Map<number, Promise<unknown>>()
+
+ipcMain.handle('ot:connect', async (e, projectId: string) => {
+  const inFlight = connectsInFlight.get(e.sender.id)
+  if (inFlight) return inFlight
+  const p = otConnectImpl(e, projectId).finally(() => connectsInFlight.delete(e.sender.id))
+  connectsInFlight.set(e.sender.id, p)
+  return p
+})
+
+async function otConnectImpl(e: Electron.IpcMainInvokeEvent, projectId: string) {
   if (!overleafSessionCookie) return { success: false, message: 'not_logged_in' }
 
-  try {
-    overleafSock = new OverleafSocket()
+  const contents = e.sender
 
+  // Same project already open in another tab → activate it instead of
+  // spinning up a second bridge on the same sync dir
+  const other = sessionsByProject.get(projectId)
+  if (other && other.webContentsId !== contents.id && !other.contents.isDestroyed()) {
+    activateTab(projectId)
+    return { success: false, message: 'already_open' }
+  }
+
+  // Reconnect from the same tab → tear the old session down first
+  const stale = sessions.get(contents.id)
+  if (stale) await destroySession(stale)
+
+  // A just-closed session of this project may still be tearing down the
+  // shared sync dir (bridge stop + rm -rf) — wait before writing into it
+  const pendingTeardown = projectTeardowns.get(projectId)
+  if (pendingTeardown) await pendingTeardown
+
+  if (contents.isDestroyed()) return { success: false, message: 'window_closed' }
+  // Re-check after the awaits: another tab may have claimed the project
+  const claimed = sessionsByProject.get(projectId)
+  if (claimed && claimed.webContentsId !== contents.id && !claimed.contents.isDestroyed()) {
+    activateTab(projectId)
+    return { success: false, message: 'already_open' }
+  }
+
+  const sock = new OverleafSocket()
+  const compilation = new CompilationManager(projectId, overleafSessionCookie)
+  const s: ProjectSession = {
+    projectId,
+    contents,
+    webContentsId: contents.id,
+    sock,
+    compilationManager: compilation,
+    fileSyncBridge: null,
+    docEventHandlers: new Map(),
+    mcpStateDir: '',
+    mcpCommentContexts: {},
+    mcpPathDocMap: {},
+    mcpOnlineUsers: new Map(),
+    mcpOnlineUsersWriteTimer: null,
+    commentContextRefreshTimer: null,
+    mcpCompileRequestPath: null,
+    mcpCompileActive: false,
+    compileInProgress: null
+  }
+  sessions.set(s.webContentsId, s)
+  sessionsByProject.set(projectId, s)
+
+  // True while this session is still the registered one and its tab lives.
+  // The tab can close during any await below — 'destroyed' evicts the session,
+  // and everything set up afterwards must be torn down by hand.
+  const alive = () => sessions.get(s.webContentsId) === s && !contents.isDestroyed()
+
+  try {
     // Relay events to renderer
-    overleafSock.on('connectionState', (state: string) => {
-      sendToRenderer('ot:connectionState', state)
+    sock.on('connectionState', (state: string) => {
+      sessionSend(s, 'ot:connectionState', state)
     })
 
     // otUpdateApplied: server acknowledges our op with a no-op update on
     // official Overleaf, but some deployments echo own-source ops instead.
-    overleafSock.on('serverEvent', (name: string, args: unknown[]) => {
+    sock.on('serverEvent', (name: string, args: unknown[]) => {
       if (name === 'otUpdateApplied') {
         const update = args[0] as { doc?: string; op?: unknown[]; v?: number; meta?: { source?: string } } | undefined
-        const isOwnSource = update?.meta?.source && update.meta.source === overleafSock?.publicId
+        const isOwnSource = update?.meta?.source && update.meta.source === sock.publicId
         if (update?.doc && (!update.op || isOwnSource)) {
-          sendToRenderer('ot:ack', { docId: update.doc })
+          sessionSend(s, 'ot:ack', { docId: update.doc })
         }
       } else if (name === 'otUpdateError') {
         console.log(`[ot:error] server rejected update:`, JSON.stringify(args).slice(0, 500))
       }
     })
 
-    overleafSock.on('docRejoined', (docId: string, result: JoinDocResult) => {
-      sendToRenderer('ot:docRejoined', {
+    sock.on('docRejoined', (docId: string, result: JoinDocResult) => {
+      sessionSend(s, 'ot:docRejoined', {
         docId,
         content: result.docLines.join('\n'),
         version: result.version
@@ -950,28 +1263,28 @@ ipcMain.handle('ot:connect', async (_e, projectId: string) => {
     })
 
     // Relay collaborator cursor updates to renderer + track for MCP
-    overleafSock.on('serverEvent', (name: string, args: unknown[]) => {
+    sock.on('serverEvent', (name: string, args: unknown[]) => {
       if (name === 'clientTracking.clientUpdated') {
         const u = args[0] as { id: string; user_id?: string; name?: string; email?: string }
         // Skip our own echo — the native caret already marks our position;
         // colored overlay cursors are for collaborators only (web behavior)
-        if (!u.id || u.id !== overleafSock?.publicId) {
-          sendToRenderer('cursor:remoteUpdate', args[0])
+        if (!u.id || u.id !== sock.publicId) {
+          sessionSend(s, 'cursor:remoteUpdate', args[0])
         }
         // Track online user for MCP (includes ourselves)
         if (u.id) {
-          mcpOnlineUsers.set(u.id, { name: u.name || u.email?.split('@')[0] || 'User', email: u.email })
-          writeMcpOnlineUsers()
+          s.mcpOnlineUsers.set(u.id, { name: u.name || u.email?.split('@')[0] || 'User', email: u.email })
+          writeMcpOnlineUsers(s)
         }
       } else if (name === 'clientTracking.clientDisconnected') {
-        sendToRenderer('cursor:remoteDisconnected', args[0])
+        sessionSend(s, 'cursor:remoteDisconnected', args[0])
         const clientId = args[0] as string
         if (clientId) {
-          mcpOnlineUsers.delete(clientId)
-          writeMcpOnlineUsers()
+          s.mcpOnlineUsers.delete(clientId)
+          writeMcpOnlineUsers(s)
         }
       } else if (name === 'new-chat-message') {
-        sendToRenderer('chat:newMessage', args[0])
+        sessionSend(s, 'chat:newMessage', args[0])
       } else if (
         name === 'new-comment' ||
         name === 'resolve-thread' ||
@@ -980,24 +1293,27 @@ ipcMain.handle('ot:connect', async (_e, projectId: string) => {
         name === 'edit-message' ||
         name === 'delete-message'
       ) {
-        sendToRenderer('comments:event', { type: name, args })
+        sessionSend(s, 'comments:event', { type: name, args })
         // Re-fetch comment contexts for MCP when comments change
         if (name === 'new-comment' || name === 'delete-thread') {
-          scheduleCommentContextRefresh()
+          scheduleCommentContextRefresh(s)
         }
       }
     })
 
-    const projectResult = await overleafSock.connect(projectId, overleafSessionCookie)
+    const projectResult = await sock.connect(projectId, overleafSessionCookie)
+    if (!alive()) {
+      // Window closed during the handshake — the 'closed' teardown could not
+      // reach this socket yet, so disconnect it here
+      try { sock.disconnect() } catch { /* ignore */ }
+      return { success: false, message: 'window_closed' }
+    }
     const { files, docPathMap, pathDocMap, fileRefs, rootFolderId } = walkRootFolder(projectResult.project.rootFolder)
 
-    // Set up compilation manager
-    compilationManager = new CompilationManager(projectId, overleafSessionCookie)
-
     // Set up file sync bridge for bidirectional sync
-    const tmpDir = compilationManager.dir
-    fileSyncBridge = new FileSyncBridge(
-      overleafSock, tmpDir, docPathMap, pathDocMap, fileRefs, mainWindow!,
+    const tmpDir = compilation.dir
+    s.fileSyncBridge = new FileSyncBridge(
+      sock, tmpDir, docPathMap, pathDocMap, fileRefs, contents,
       projectId, overleafSessionCookie, overleafCsrfToken,
       async () => {
         // Re-fetch CSRF token (rotates over long sessions); cookie may also
@@ -1006,17 +1322,22 @@ ipcMain.handle('ot:connect', async (_e, projectId: string) => {
         return ok ? { cookie: overleafSessionCookie, csrfToken: overleafCsrfToken } : null
       }
     )
-    await fileSyncBridge.start()
+    await s.fileSyncBridge.start()
+    if (!alive()) {
+      try { await s.fileSyncBridge.stop() } catch { /* ignore */ }
+      try { sock.disconnect() } catch { /* ignore */ }
+      return { success: false, message: 'window_closed' }
+    }
 
     // Start MCP compile watcher (detects compile requests from Claude Code)
-    startMcpCompileWatcher(tmpDir)
+    startMcpCompileWatcher(s, tmpDir)
 
     // Write MCP state + config for Claude Code integration
-    mcpStateDir = tmpDir
-    mcpProjectId = projectId
-    mcpCommentContexts = {}
-    mcpPathDocMap = pathDocMap
-    await writeMcpState()
+    s.mcpStateDir = tmpDir
+    s.mcpPathDocMap = pathDocMap
+    await writeMcpState(s)
+
+    // Tab title comes from the renderer's document.title via 'page-title-updated'
     // Write .mcp.json so Claude Code auto-discovers the MCP server
     // Dev: use source file. Packaged: copy bundled server into the project
     // temp dir so .mcp.json never contains a stale App Translocation path.
@@ -1201,19 +1522,19 @@ The tools above come from LatteX's MCP server (standard stdio MCP — works with
         for (const [tid, t] of Object.entries(threads)) {
           if (t.resolved) resolvedIds.push(tid)
         }
-        sendToRenderer('comments:initThreads', { threads: threadResult.data, resolvedIds })
+        sessionSend(s, 'comments:initThreads', { threads: threadResult.data, resolvedIds })
       }
     }).catch(() => {})
 
     // Fetch comment contexts from all docs in background (slower — joins each doc)
     setTimeout(async () => {
-      if (!overleafSock?.projectData) return
+      if (sessions.get(s.webContentsId) !== s || !sock.projectData) return
 
-      const { docPathMap: dp } = walkRootFolder(overleafSock.projectData.project.rootFolder)
+      const { docPathMap: dp } = walkRootFolder(sock.projectData.project.rootFolder)
       const contexts: Record<string, { file: string; text: string; pos: number }> = {}
       for (const [did, rp] of Object.entries(dp)) {
         try {
-          const result = await overleafSock.joinDoc(did)
+          const result = await sock.joinDoc(did)
           if (result.ranges?.comments) {
             for (const c of result.ranges.comments) {
               if (c.op?.t) contexts[c.op.t] = { file: rp, text: c.op.c || '', pos: c.op.p || 0 }
@@ -1222,9 +1543,9 @@ The tools above come from LatteX's MCP server (standard stdio MCP — works with
           // Don't leaveDoc — bridge keeps all docs joined
         } catch { /* ignore */ }
       }
-      mcpCommentContexts = contexts
-      writeMcpState()
-      sendToRenderer('comments:initContexts', { contexts })
+      s.mcpCommentContexts = contexts
+      writeMcpState(s)
+      sessionSend(s, 'comments:initContexts', { contexts })
     }, 3000)
 
     // Check for cached PDF from previous compile
@@ -1250,52 +1571,40 @@ The tools above come from LatteX's MCP server (standard stdio MCP — works with
       syncDir: tmpDir,
       cachedPdfPath
     }
-  } catch (e) {
-    console.log('[ot:connect] error:', e)
-    return { success: false, message: String(e) }
+  } catch (err) {
+    console.log('[ot:connect] error:', err)
+    // Tear down only OUR session — if the window was closed (or reconnected)
+    // mid-flight, the registered session belongs to someone else now
+    if (sessions.get(s.webContentsId) === s) {
+      await destroySession(s)
+    } else {
+      try { await s.fileSyncBridge?.stop() } catch { /* ignore */ }
+      try { sock.disconnect() } catch { /* ignore */ }
+    }
+    return { success: false, message: String(err) }
   }
+}
+
+ipcMain.handle('ot:disconnect', async (e) => {
+  const s = getSession(e)
+  if (s) await destroySession(s)
 })
 
-ipcMain.handle('ot:disconnect', async () => {
-  // Clean up MCP state file + compile watcher
-  stopMcpCompileWatcher()
-  if (mcpStateDir) {
-    unlink(join(mcpStateDir, '.lattex-mcp.json')).catch(() => {})
-    unlink(join(mcpStateDir, '.lattex-online-users.json')).catch(() => {})
-  }
-  mcpStateDir = ''
-  mcpProjectId = ''
-  mcpCommentContexts = {}
-  mcpOnlineUsers.clear()
-
-  await fileSyncBridge?.stop()
-  fileSyncBridge = null
-  overleafSock?.disconnect()
-  overleafSock = null
-  await compilationManager?.cleanup()
-  compilationManager = null
-})
-
-// Track per-doc event handlers for cleanup on leaveDoc
-const docEventHandlers = new Map<string, (name: string, args: unknown[]) => void>()
-
-function attachRendererDoc(docId: string): void {
-  if (!overleafSock) return
-
+function attachRendererDoc(s: ProjectSession, docId: string): void {
   // Notify bridge that editor is taking over this doc
-  fileSyncBridge?.addEditorDoc(docId)
+  s.fileSyncBridge?.addEditorDoc(docId)
 
   // Remove existing handler if re-attaching
-  const existingHandler = docEventHandlers.get(docId)
-  if (existingHandler) overleafSock.removeListener('serverEvent', existingHandler)
+  const existingHandler = s.docEventHandlers.get(docId)
+  if (existingHandler) s.sock.removeListener('serverEvent', existingHandler)
 
   // Set up relay for remote ops on this doc
   const handler = (name: string, args: unknown[]) => {
     if (name === 'otUpdateApplied') {
       const update = args[0] as { doc?: string; op?: unknown[]; v?: number; meta?: { source?: string } } | undefined
-      const isOwnSource = update?.meta?.source && update.meta.source === overleafSock?.publicId
+      const isOwnSource = update?.meta?.source && update.meta.source === s.sock.publicId
       if (update?.doc === docId && update.op && !isOwnSource) {
-        sendToRenderer('ot:remoteOp', {
+        sessionSend(s, 'ot:remoteOp', {
           docId: update.doc,
           ops: update.op,
           version: update.v
@@ -1303,26 +1612,27 @@ function attachRendererDoc(docId: string): void {
       }
     }
   }
-  docEventHandlers.set(docId, handler)
-  overleafSock.on('serverEvent', handler)
+  s.docEventHandlers.set(docId, handler)
+  s.sock.on('serverEvent', handler)
 }
 
-ipcMain.handle('ot:joinDoc', async (_e, docId: string) => {
-  if (!overleafSock) return { success: false, message: 'not_connected' }
+ipcMain.handle('ot:joinDoc', async (e, docId: string) => {
+  const s = getSession(e)
+  if (!s) return { success: false, message: 'not_connected' }
 
   try {
-    const result = await overleafSock.joinDoc(docId)
+    const result = await s.sock.joinDoc(docId)
     const content = (result.docLines || []).join('\n')
     // Update compilation manager with doc content
-    if (compilationManager && overleafSock.projectData) {
-      const { docPathMap } = walkRootFolder(overleafSock.projectData.project.rootFolder)
+    if (s.sock.projectData) {
+      const { docPathMap } = walkRootFolder(s.sock.projectData.project.rootFolder)
       const relPath = docPathMap[docId]
       if (relPath) {
-        compilationManager.setDocContent(relPath, content)
+        s.compilationManager.setDocContent(relPath, content)
       }
     }
 
-    attachRendererDoc(docId)
+    attachRendererDoc(s, docId)
 
     return {
       success: true,
@@ -1330,50 +1640,54 @@ ipcMain.handle('ot:joinDoc', async (_e, docId: string) => {
       version: result.version,
       ranges: result.ranges
     }
-  } catch (e) {
-    console.log('[ot:joinDoc] error:', e)
-    return { success: false, message: String(e) }
+  } catch (err) {
+    console.log('[ot:joinDoc] error:', err)
+    return { success: false, message: String(err) }
   }
 })
 
-ipcMain.handle('ot:attachDoc', async (_e, docId: string) => {
-  attachRendererDoc(docId)
+ipcMain.handle('ot:attachDoc', async (e, docId: string) => {
+  const s = getSession(e)
+  if (s) attachRendererDoc(s, docId)
 })
 
-ipcMain.handle('ot:leaveDoc', async (_e, docId: string) => {
-  if (!overleafSock) return
+ipcMain.handle('ot:leaveDoc', async (e, docId: string) => {
+  const s = getSession(e)
+  if (!s) return
   try {
     // Remove event handler for this doc
-    const handler = docEventHandlers.get(docId)
+    const handler = s.docEventHandlers.get(docId)
     if (handler) {
-      overleafSock.removeListener('serverEvent', handler)
-      docEventHandlers.delete(docId)
+      s.sock.removeListener('serverEvent', handler)
+      s.docEventHandlers.delete(docId)
     }
     // Bridge takes back OT ownership — do NOT leaveDoc on the socket,
     // the bridge keeps the doc joined for sync
-    fileSyncBridge?.removeEditorDoc(docId)
-  } catch (e) {
-    console.log('[ot:leaveDoc] error:', e)
+    s.fileSyncBridge?.removeEditorDoc(docId)
+  } catch (err) {
+    console.log('[ot:leaveDoc] error:', err)
   }
 })
 
-ipcMain.handle('ot:sendOp', async (_e, docId: string, ops: unknown[], version: number, hash: string) => {
-  if (!overleafSock) return
+ipcMain.handle('ot:sendOp', async (e, docId: string, ops: unknown[], version: number, hash: string) => {
+  const s = getSession(e)
+  if (!s) return
   try {
-    await overleafSock.applyOtUpdate(docId, ops, version, hash)
-  } catch (e) {
-    console.log('[ot:sendOp] error:', e)
+    await s.sock.applyOtUpdate(docId, ops, version, hash)
+  } catch (err) {
+    console.log('[ot:sendOp] error:', err)
   }
 })
 
 // Renderer → bridge: editor content changed (for disk sync)
-ipcMain.handle('sync:contentChanged', async (_e, docId: string, content: string) => {
-  fileSyncBridge?.onEditorContentChanged(docId, content)
+ipcMain.handle('sync:contentChanged', async (e, docId: string, content: string) => {
+  getSession(e)?.fileSyncBridge?.onEditorContentChanged(docId, content)
 })
 
 // Renderer ← bridge: all synced doc contents (for project-wide autocomplete)
-ipcMain.handle('sync:getAllDocContents', async () => {
-  return fileSyncBridge ? fileSyncBridge.getAllDocContents() : []
+ipcMain.handle('sync:getAllDocContents', async (e) => {
+  const s = getSession(e)
+  return s?.fileSyncBridge ? s.fileSyncBridge.getAllDocContents() : []
 })
 
 // Official metadata endpoint: labels + package command snippets per doc
@@ -1386,31 +1700,32 @@ ipcMain.handle('overleaf:getMetadata', async (_e, projectId: string) => {
 
 // ── Cursor Tracking ────────────────────────────────────────────
 
-ipcMain.handle('cursor:update', async (_e, docId: string, row: number, column: number) => {
-  overleafSock?.updateCursorPosition(docId, row, column)
+ipcMain.handle('cursor:update', async (e, docId: string, row: number, column: number) => {
+  getSession(e)?.sock.updateCursorPosition(docId, row, column)
 })
 
-ipcMain.handle('cursor:getConnectedUsers', async () => {
-  if (!overleafSock) return []
+ipcMain.handle('cursor:getConnectedUsers', async (e) => {
+  const s = getSession(e)
+  if (!s) return []
   try {
-    const users = await overleafSock.getConnectedUsers()
+    const users = await s.sock.getConnectedUsers()
     // Seed MCP online users map (includes ourselves)
-    mcpOnlineUsers.clear()
+    s.mcpOnlineUsers.clear()
     for (const raw of users) {
       const u = raw as { client_id?: string; first_name?: string; last_name?: string; email?: string }
       if (u.client_id) {
         const name = [u.first_name, u.last_name].filter(Boolean).join(' ') || u.email?.split('@')[0] || 'User'
-        mcpOnlineUsers.set(u.client_id, { name, email: u.email })
+        s.mcpOnlineUsers.set(u.client_id, { name, email: u.email })
       }
     }
-    writeMcpOnlineUsers()
+    writeMcpOnlineUsers(s)
     // Exclude our own client — no colored overlay cursor for ourselves
     return users.filter((raw) => {
       const u = raw as { client_id?: string }
-      return !u.client_id || u.client_id !== overleafSock?.publicId
+      return !u.client_id || u.client_id !== s.sock.publicId
     })
-  } catch (e) {
-    console.log('[cursor:getConnectedUsers] error:', e)
+  } catch (err) {
+    console.log('[cursor:getConnectedUsers] error:', err)
     return []
   }
 })
@@ -1770,16 +2085,17 @@ ipcMain.handle('project:uploadFile', async (_e, projectId: string, folderId: str
 })
 
 // Fetch comment ranges from ALL docs (for ReviewPanel)
-ipcMain.handle('ot:fetchAllCommentContexts', async () => {
-  if (!overleafSock?.projectData) return { success: false }
+ipcMain.handle('ot:fetchAllCommentContexts', async (e) => {
+  const s = getSession(e)
+  if (!s?.sock.projectData) return { success: false }
 
-  const { docPathMap } = walkRootFolder(overleafSock.projectData.project.rootFolder)
+  const { docPathMap } = walkRootFolder(s.sock.projectData.project.rootFolder)
   const contexts: Record<string, { file: string; text: string; pos: number }> = {}
 
   for (const [docId, relPath] of Object.entries(docPathMap)) {
     try {
-      const alreadyJoined = docEventHandlers.has(docId)
-      const result = await overleafSock.joinDoc(docId)
+      const alreadyJoined = s.docEventHandlers.has(docId)
+      const result = await s.sock.joinDoc(docId)
       if (result.ranges?.comments) {
         for (const c of result.ranges.comments) {
           if (c.op?.t) {
@@ -1788,102 +2104,103 @@ ipcMain.handle('ot:fetchAllCommentContexts', async () => {
         }
       }
       if (!alreadyJoined) {
-        await overleafSock.leaveDoc(docId)
+        await s.sock.leaveDoc(docId)
       }
-    } catch (e) {
-      console.log(`[fetchCommentContexts] failed for ${relPath}:`, e)
+    } catch (err) {
+      console.log(`[fetchCommentContexts] failed for ${relPath}:`, err)
     }
   }
 
   // Update MCP state with fresh comment contexts
-  mcpCommentContexts = contexts
-  writeMcpState()
+  s.mcpCommentContexts = contexts
+  writeMcpState(s)
 
   return { success: true, contexts }
 })
 
-ipcMain.handle('overleaf:socketCompile', async (_e, mainTexRelPath: string) => {
-  if (!compilationManager || !overleafSock?.projectData) {
+ipcMain.handle('overleaf:socketCompile', async (e, mainTexRelPath: string) => {
+  const s = getSession(e)
+  if (!s?.sock.projectData) {
     return { success: false, log: 'No compilation manager or not connected', pdfPath: '' }
   }
+  const compilation = s.compilationManager
 
   // latexmk writes its output into the synced dir root (-outdir) — tell the
   // bridge so the produced PDF is never uploaded to Overleaf as content.
-  fileSyncBridge?.addCompileOutput(basename(mainTexRelPath, '.tex') + '.pdf')
+  s.fileSyncBridge?.addCompileOutput(basename(mainTexRelPath, '.tex') + '.pdf')
 
   // Bridge already keeps all docs synced to disk. Sync content to compilation manager.
-  if (fileSyncBridge) {
-    for (const { path, content } of fileSyncBridge.getAllDocContents()) {
-      compilationManager.setDocContent(path, content)
+  if (s.fileSyncBridge) {
+    for (const { path, content } of s.fileSyncBridge.getAllDocContents()) {
+      compilation.setDocContent(path, content)
     }
   } else {
     // Fallback: fetch docs from socket if bridge isn't available
-    const { docPathMap } = walkRootFolder(overleafSock.projectData.project.rootFolder)
+    const { docPathMap } = walkRootFolder(s.sock.projectData.project.rootFolder)
     const allDocIds = Object.keys(docPathMap)
     for (const docId of allDocIds) {
       const relPath = docPathMap[docId]
-      if (docEventHandlers.has(docId) && compilationManager.hasDoc(relPath)) continue
+      if (s.docEventHandlers.has(docId) && compilation.hasDoc(relPath)) continue
       try {
-        const alreadyJoined = docEventHandlers.has(docId)
-        const result = await overleafSock.joinDoc(docId)
+        const alreadyJoined = s.docEventHandlers.has(docId)
+        const result = await s.sock.joinDoc(docId)
         const content = (result.docLines || []).join('\n')
-        compilationManager.setDocContent(relPath, content)
+        compilation.setDocContent(relPath, content)
         if (!alreadyJoined) {
-          await overleafSock.leaveDoc(docId)
+          await s.sock.leaveDoc(docId)
         }
-      } catch (e) {
-        console.log(`[socketCompile] failed to fetch doc ${relPath}:`, e)
+      } catch (err) {
+        console.log(`[socketCompile] failed to fetch doc ${relPath}:`, err)
       }
     }
   }
 
   // Download all binary files (images, .bst, etc.)
-  const fileRefs = fileSyncBridge
-    ? fileSyncBridge.getFileRefs()
-    : walkRootFolder(overleafSock.projectData.project.rootFolder).fileRefs
-  await compilationManager.syncBinaries(fileRefs)
+  const fileRefs = s.fileSyncBridge
+    ? s.fileSyncBridge.getFileRefs()
+    : walkRootFolder(s.sock.projectData.project.rootFolder).fileRefs
+  await compilation.syncBinaries(fileRefs)
 
-  return compilationManager.compile(mainTexRelPath, (data) => {
-    sendToRenderer('latex:log', data)
+  return compilation.compile(mainTexRelPath, (data) => {
+    sessionSend(s, 'latex:log', data)
   })
 })
 
 // Server-side compile via Overleaf's CLSI (shared by IPC handler + MCP compile watcher)
-let compileInProgress: Promise<{ success: boolean; log: string; pdfPath: string }> | null = null
 
-async function doServerCompile(rootDocId?: string): Promise<{ success: boolean; log: string; pdfPath: string }> {
+async function doServerCompile(s: ProjectSession, rootDocId?: string): Promise<{ success: boolean; log: string; pdfPath: string }> {
   // Prevent concurrent compiles — wait for existing one if already in progress
-  if (compileInProgress) {
+  if (s.compileInProgress) {
     console.log('[compile] compile already in progress, waiting...')
-    return compileInProgress
+    return s.compileInProgress
   }
 
-  const promise = doServerCompileImpl(rootDocId)
-  compileInProgress = promise
+  const promise = doServerCompileImpl(s, rootDocId)
+  s.compileInProgress = promise
   try {
     return await promise
   } finally {
-    compileInProgress = null
+    s.compileInProgress = null
   }
 }
 
-async function doServerCompileImpl(rootDocId?: string): Promise<{ success: boolean; log: string; pdfPath: string }> {
-  if (!overleafSessionCookie || !overleafSock?.projectData) {
+async function doServerCompileImpl(s: ProjectSession, rootDocId?: string): Promise<{ success: boolean; log: string; pdfPath: string }> {
+  if (!overleafSessionCookie || !s.sock.projectData) {
     return { success: false, log: 'Not connected', pdfPath: '' }
   }
 
-  const projectId = overleafSock.projectData.project._id
-  const effectiveRootDocId = rootDocId || overleafSock.projectData.project.rootDoc_id || null
+  const projectId = s.sock.projectData.project._id
+  const effectiveRootDocId = rootDocId || s.sock.projectData.project.rootDoc_id || null
 
   // Resolve rootResourcePath (file path of root doc) — matches Overleaf web client
   let rootResourcePath: string | undefined
   if (effectiveRootDocId) {
-    const { docPathMap } = walkRootFolder(overleafSock.projectData.project.rootFolder)
+    const { docPathMap } = walkRootFolder(s.sock.projectData.project.rootFolder)
     rootResourcePath = docPathMap[effectiveRootDocId]
   }
 
   try {
-    sendToRenderer('latex:log', 'Compiling on Overleaf server...\n')
+    sessionSend(s, 'latex:log', 'Compiling on Overleaf server...\n')
 
     // Flush in-memory OT changes to database so CLSI sees latest content
     try {
@@ -1909,7 +2226,7 @@ async function doServerCompileImpl(rootDocId?: string): Promise<{ success: boole
     console.log(`[compile] compile response: ok=${compileResult.ok} status=${compileResult.status}`)
 
     if (!compileResult.ok) {
-      sendToRenderer('latex:log', `Compile failed: HTTP ${compileResult.status}\n`)
+      sessionSend(s, 'latex:log', `Compile failed: HTTP ${compileResult.status}\n`)
       return { success: false, log: '', pdfPath: '' }
     }
 
@@ -1917,7 +2234,7 @@ async function doServerCompileImpl(rootDocId?: string): Promise<{ success: boole
 
     // Diagnostic: log compile status and available output files
     const outputPaths = (data.outputFiles || []).map((f: any) => f.path)
-    sendToRenderer('latex:log', `[CLSI status=${data.status}, outputFiles=[${outputPaths.join(', ')}]]\n`)
+    sessionSend(s, 'latex:log', `[CLSI status=${data.status}, outputFiles=[${outputPaths.join(', ')}]]\n`)
 
     // Build query params for fetching output files (matches Overleaf web client)
     const params = new URLSearchParams()
@@ -1932,7 +2249,7 @@ async function doServerCompileImpl(rootDocId?: string): Promise<{ success: boole
     }
 
     // Build output dir — separate from synced project dir to avoid re-uploading artifacts
-    const syncDir = compilationManager?.dir || join(require('os').tmpdir(), `lattex-${projectId}`)
+    const syncDir = s.compilationManager.dir
     const buildDir = join(syncDir, '.build')
     await mkdirAsync(buildDir, { recursive: true })
 
@@ -1942,11 +2259,11 @@ async function doServerCompileImpl(rootDocId?: string): Promise<{ success: boole
       try {
         const logContent = await fetchBinary(buildOutputUrl(logFile), overleafSessionCookie)
         const logText = Buffer.from(logContent).toString('utf-8')
-        sendToRenderer('latex:log', logText)
+        sessionSend(s, 'latex:log', logText)
         // Write log for MCP server to read (avoids redundant compile API call)
         writeFile(join(syncDir, '.lattex-compile-log'), logText).catch(() => {})
       } catch (e) {
-        sendToRenderer('latex:log', `[log fetch failed: ${e}]\n`)
+        sessionSend(s, 'latex:log', `[log fetch failed: ${e}]\n`)
       }
     }
 
@@ -1980,7 +2297,7 @@ async function doServerCompileImpl(rootDocId?: string): Promise<{ success: boole
         pdfPath = pdfDest
       } catch (e) {
         console.log(`[compile] PDF direct download failed: ${e}`)
-        sendToRenderer('latex:log', `\n[PDF download failed: ${e}]\n`)
+        sessionSend(s, 'latex:log', `\n[PDF download failed: ${e}]\n`)
       }
     }
 
@@ -1996,7 +2313,7 @@ async function doServerCompileImpl(rootDocId?: string): Promise<{ success: boole
             const pdfDest = join(buildDir, 'output.pdf')
             await writeFile(pdfDest, Buffer.from(pdfData))
             pdfPath = pdfDest
-            sendToRenderer('latex:log', `\n[PDF retrieved via direct URL (${(pdfData.byteLength / 1024).toFixed(0)} KB)]\n`)
+            sessionSend(s, 'latex:log', `\n[PDF retrieved via direct URL (${(pdfData.byteLength / 1024).toFixed(0)} KB)]\n`)
           }
         } catch {
           // PDF truly not available on CLSI
@@ -2005,34 +2322,34 @@ async function doServerCompileImpl(rootDocId?: string): Promise<{ success: boole
     }
 
     if (!pdfPath && data.status !== 'success') {
-      sendToRenderer('latex:log', `\n[Compile status: ${data.status} — PDF not available]\n`)
+      sessionSend(s, 'latex:log', `\n[Compile status: ${data.status} — PDF not available]\n`)
     }
 
     return { success: data.status === 'success', log: '', pdfPath }
   } catch (e) {
     const msg = `Server compile error: ${e}`
-    sendToRenderer('latex:log', msg + '\n')
+    sessionSend(s, 'latex:log', msg + '\n')
     return { success: false, log: msg, pdfPath: '' }
   }
 }
 
-ipcMain.handle('overleaf:serverCompile', async (_e, rootDocId?: string) => {
-  return doServerCompile(rootDocId)
+ipcMain.handle('overleaf:serverCompile', async (e, rootDocId?: string) => {
+  const s = getSession(e)
+  if (!s) return { success: false, log: 'Not connected', pdfPath: '' }
+  return doServerCompile(s, rootDocId)
 })
 
 // Watch for MCP compile requests (file-based signal from MCP server process)
-let mcpCompileWatcher: ReturnType<typeof import('fs').watchFile> | null = null
-let mcpCompileActive = false
 
-function startMcpCompileWatcher(syncDir: string) {
+function startMcpCompileWatcher(s: ProjectSession, syncDir: string) {
   const requestPath = join(syncDir, '.lattex-compile-request')
   const resultPath = join(syncDir, '.lattex-compile-result')
 
   // Poll for the request file every 300ms
-  const { watchFile, unwatchFile } = require('fs')
+  const { watchFile } = require('fs')
   watchFile(requestPath, { interval: 300 }, async (curr: { size: number }) => {
-    if (curr.size === 0 || mcpCompileActive) return
-    mcpCompileActive = true
+    if (curr.size === 0 || s.mcpCompileActive) return
+    s.mcpCompileActive = true
 
     try {
       const reqData = JSON.parse(await readFile(requestPath, 'utf-8'))
@@ -2041,18 +2358,18 @@ function startMcpCompileWatcher(syncDir: string) {
       console.log('[mcp-compile] compile request received:', reqData.requestId)
 
       // Notify renderer: compile started
-      sendToRenderer('compile:mcpStarted', null)
+      sessionSend(s, 'compile:mcpStarted', null)
 
       // Resolve main_file to rootDocId if provided
       let rootDocId: string | undefined
-      if (reqData.mainFile && mcpPathDocMap[reqData.mainFile]) {
-        rootDocId = mcpPathDocMap[reqData.mainFile]
+      if (reqData.mainFile && s.mcpPathDocMap[reqData.mainFile]) {
+        rootDocId = s.mcpPathDocMap[reqData.mainFile]
       }
 
-      const result = await doServerCompile(rootDocId)
+      const result = await doServerCompile(s, rootDocId)
 
       // Notify renderer: compile finished (renderer will update PDF + compiling state)
-      sendToRenderer('compile:mcpFinished', {
+      sessionSend(s, 'compile:mcpFinished', {
         success: result.success,
         pdfPath: result.pdfPath
       })
@@ -2073,21 +2390,21 @@ function startMcpCompileWatcher(syncDir: string) {
         status: 'error',
         error: String(e)
       })).catch(() => {})
-      sendToRenderer('compile:mcpFinished', { success: false, pdfPath: '' })
+      sessionSend(s, 'compile:mcpFinished', { success: false, pdfPath: '' })
     } finally {
-      mcpCompileActive = false
+      s.mcpCompileActive = false
     }
   })
 
-  mcpCompileWatcher = { requestPath } as any
+  s.mcpCompileRequestPath = requestPath
   console.log('[mcp-compile] watcher started for', requestPath)
 }
 
-function stopMcpCompileWatcher() {
-  if (mcpCompileWatcher) {
+function stopMcpCompileWatcher(s: ProjectSession) {
+  if (s.mcpCompileRequestPath) {
     const { unwatchFile } = require('fs')
-    unwatchFile((mcpCompileWatcher as any).requestPath)
-    mcpCompileWatcher = null
+    unwatchFile(s.mcpCompileRequestPath)
+    s.mcpCompileRequestPath = null
   }
 }
 
@@ -2140,25 +2457,21 @@ ipcMain.handle('shell:savePdf', async (_e, sourcePath: string) => {
 // ── App Lifecycle ────────────────────────────────────────────────
 
 app.whenReady().then(async () => {
-  createWindow()
+  createListWindow()
   sessionLoadPromise = loadOverleafSession()
 
 })
 
 app.on('window-all-closed', () => {
   mainWindow = null
-  stopMcpCompileWatcher()
+  for (const s of sessions.values()) destroySession(s)
   for (const inst of ptyInstances.values()) inst.kill()
   ptyInstances.clear()
-  fileSyncBridge?.stop()
-  fileSyncBridge = null
-  overleafSock?.disconnect()
-  compilationManager?.cleanup()
   app.quit()
 })
 
 app.on('activate', () => {
   if (BrowserWindow.getAllWindows().length === 0) {
-    createWindow()
+    createListWindow()
   }
 })

@@ -84,6 +84,9 @@ html, body, #root {
 
 .welcome-content {
   text-align: center;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
 }
 
 .welcome-logo {
@@ -977,6 +980,114 @@ html, body, #root {
   color: var(--text-muted);
   text-align: center;
   white-space: pre-wrap;
+}
+
+/* ── Tab bar (browser-tab model: home + one tab per project) ─── */
+/* Height must equal TAB_BAR_HEIGHT in src/main/index.ts — project
+   WebContentsViews are laid out directly below this strip. */
+
+.home-root {
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.home-content {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+/* Tab bar replaces the list page's own drag strip */
+.with-tab-bar .projects-drag-bar {
+  display: none;
+}
+
+/* "wt-" = window tabs — deliberately distinct from the editor's file-tab
+   classes (.tab-bar/.tab), which must NOT pick up app-region: drag */
+.wt-bar {
+  height: 38px;
+  box-sizing: border-box;
+  display: flex;
+  align-items: flex-end;
+  gap: 3px;
+  padding: 5px 8px 0;
+  background: var(--bg-tertiary);
+  border-bottom: 1px solid var(--border);
+  -webkit-app-region: drag;
+  flex-shrink: 0;
+  overflow: hidden;
+}
+
+/* Leave room for macOS traffic lights */
+.wt-bar-mac {
+  padding-left: 84px;
+}
+
+.wt-tab {
+  -webkit-app-region: no-drag;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 10px;
+  min-width: 0;
+  max-width: 200px;
+  border: 1px solid transparent;
+  border-bottom: none;
+  border-radius: 7px 7px 0 0;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-family: var(--font-sans);
+  cursor: pointer;
+  user-select: none;
+}
+
+.wt-tab:hover {
+  background: var(--bg-hover);
+}
+
+.wt-tab.active {
+  background: var(--bg-primary);
+  border-color: var(--border);
+  color: var(--text-primary);
+  /* Blend into the content below by covering the bar's bottom border */
+  position: relative;
+  box-shadow: 0 1px 0 var(--bg-primary);
+}
+
+.wt-home {
+  flex-shrink: 0;
+}
+
+.wt-tab-title {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.wt-tab-close {
+  flex-shrink: 0;
+  width: 16px;
+  height: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0;
+}
+
+.wt-tab-close:hover {
+  background: var(--bg-active);
+  color: var(--text-primary);
 }
 
 /* ── Projects Page ──────────────────────────────────────────── */

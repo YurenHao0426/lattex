@@ -63,6 +63,7 @@ const api = {
   // Overleaf web session (comments)
   overleafWebLogin: () => ipcRenderer.invoke('overleaf:webLogin') as Promise<{ success: boolean }>,
   overleafHasWebSession: () => ipcRenderer.invoke('overleaf:hasWebSession') as Promise<{ loggedIn: boolean }>,
+  overleafLogout: () => ipcRenderer.invoke('overleaf:logout') as Promise<void>,
   overleafGetThreads: (projectId: string) =>
     ipcRenderer.invoke('overleaf:getThreads', projectId) as Promise<{ success: boolean; threads?: Record<string, unknown>; message?: string }>,
   overleafReplyThread: (projectId: string, threadId: string, content: string) =>
@@ -369,6 +370,20 @@ const api = {
   // API Keys
   getApiKeys: () => ipcRenderer.invoke('settings:getApiKeys') as Promise<Record<string, string>>,
   setApiKeys: (keys: Record<string, string>) => ipcRenderer.invoke('settings:setApiKeys', keys),
+
+  // Project tabs (browser-tab model: home = project list, one tab per project)
+  openProjectTab: (projectId: string, name?: string) =>
+    ipcRenderer.invoke('project:openTab', projectId, name) as Promise<{ success: boolean; focusedExisting?: boolean }>,
+  tabsList: () =>
+    ipcRenderer.invoke('tabs:list') as Promise<{ tabs: Array<{ id: string; title: string }>; active: string }>,
+  tabsActivate: (id: string) => ipcRenderer.invoke('tabs:activate', id) as Promise<void>,
+  tabsClose: (id: string) => ipcRenderer.invoke('tabs:close', id) as Promise<void>,
+  onTabsChanged: (cb: (state: { tabs: Array<{ id: string; title: string }>; active: string }) => void) => {
+    const handler = (_e: Electron.IpcRendererEvent, state: { tabs: Array<{ id: string; title: string }>; active: string }) => cb(state)
+    ipcRenderer.on('tabs:changed', handler)
+    return () => { ipcRenderer.removeListener('tabs:changed', handler) }
+  },
+  closeWindow: () => ipcRenderer.invoke('window:close') as Promise<void>,
 
   // Shell
   openExternal: (url: string) => ipcRenderer.invoke('shell:openExternal', url),

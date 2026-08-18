@@ -10,7 +10,7 @@ import { createHash } from 'crypto'
 import * as chokidar from 'chokidar'
 import { diff_match_patch } from 'diff-match-patch'
 import { net } from 'electron'
-import type { BrowserWindow } from 'electron'
+import type { WebContents } from 'electron'
 import type { OverleafSocket } from './overleafSocket'
 import { OtClient } from './otClient'
 import type { OtOp } from './otTypes'
@@ -87,7 +87,7 @@ export class FileSyncBridge {
   private pathFileRefMap: Record<string, string> // relPath → fileRefId
   private folderPathMap: Record<string, string>  // folderId → relDirPath (no trailing slash)
   private pathFolderMap: Record<string, string>  // relDirPath (no trailing slash) → folderId
-  private mainWindow: BrowserWindow
+  private target: WebContents   // the owning tab's webContents
   private projectId: string
   private cookie: string
   private csrfToken: string
@@ -103,7 +103,7 @@ export class FileSyncBridge {
     docPathMap: Record<string, string>,
     pathDocMap: Record<string, string>,
     fileRefs: Array<{ id: string; path: string }>,
-    mainWindow: BrowserWindow,
+    target: WebContents,
     projectId: string,
     cookie: string,
     csrfToken: string,
@@ -114,7 +114,7 @@ export class FileSyncBridge {
     this.tmpDir = tmpDir
     this.docPathMap = docPathMap
     this.pathDocMap = pathDocMap
-    this.mainWindow = mainWindow
+    this.target = target
     this.projectId = projectId
     this.cookie = cookie
     this.csrfToken = csrfToken
@@ -818,7 +818,7 @@ export class FileSyncBridge {
       // lastKnownContent go stale or we'll re-detect the same "change" indefinitely.
       this.lastKnownContent.set(relPath, newContent)
       bridgeLog(`[FileSyncBridge] → sending sync:externalEdit to renderer for ${relPath}`)
-      this.mainWindow.webContents.send('sync:externalEdit', { docId, content: newContent, baseContent: lastKnown ?? '' })
+      this.sendToWindow('sync:externalEdit', { docId, content: newContent, baseContent: lastKnown ?? '' })
     } else {
       // Doc NOT open in editor → bridge handles OT directly
       const oldContent = lastKnown ?? ''
@@ -1168,7 +1168,7 @@ export class FileSyncBridge {
     name: string,
     parentFolderId?: string
   ): void {
-    this.mainWindow.webContents.send('sync:entityCreated', {
+    this.sendToWindow('sync:entityCreated', {
       kind,
       entityId,
       relPath,
@@ -1178,7 +1178,7 @@ export class FileSyncBridge {
   }
 
   private notifyEntityRemoved(kind: 'doc' | 'file' | 'folder', entityId: string, relPath: string): void {
-    this.mainWindow.webContents.send('sync:entityRemoved', { kind, entityId, relPath })
+    this.sendToWindow('sync:entityRemoved', { kind, entityId, relPath })
   }
 
   private notifyEntityRenamed(
@@ -1188,7 +1188,7 @@ export class FileSyncBridge {
     newPath: string,
     newName: string
   ): void {
-    this.mainWindow.webContents.send('sync:entityRenamed', {
+    this.sendToWindow('sync:entityRenamed', {
       kind,
       entityId,
       oldPath,
@@ -1204,7 +1204,7 @@ export class FileSyncBridge {
     newPath: string,
     parentFolderId: string
   ): void {
-    this.mainWindow.webContents.send('sync:entityMoved', {
+    this.sendToWindow('sync:entityMoved', {
       kind,
       entityId,
       oldPath,
@@ -1584,8 +1584,18 @@ export class FileSyncBridge {
   }
 
   private notifySyncStatus(relPath: string, status: 'retrying' | 'synced' | 'failed', attempts?: number): void {
-    if (this.mainWindow.isDestroyed() || this.mainWindow.webContents.isDestroyed()) return
-    this.mainWindow.webContents.send('sync:fileStatus', { relPath, status, attempts })
+    this.sendToWindow('sync:fileStatus', { relPath, status, attempts })
+  }
+
+  /**
+   * Send to the owning tab, guarded — the bridge can outlive its webContents
+   * briefly (a debounced disk change firing during tab close), and an
+   * unguarded send to destroyed webContents throws inside an unawaited async
+   * path, which would take down the whole main process.
+   */
+  private sendToWindow(channel: string, payload: unknown): void {
+    if (this.target.isDestroyed()) return
+    this.target.send(channel, payload)
   }
 
   /** Create a text doc on Overleaf and sync its content */

@@ -87,11 +87,7 @@ const ICONS = {
 
 // ── Component ───────────────────────────────────────────────────────
 
-interface Props {
-  onOpenProject: (projectId: string) => void
-}
-
-export default function ProjectList({ onOpenProject }: Props) {
+export default function ProjectList() {
   const [projects, setProjects] = useState<OverleafProject[]>([])
   const [tags, setTags] = useState<Tag[]>([])
   const [loading, setLoading] = useState(true)
@@ -380,32 +376,11 @@ export default function ProjectList({ onOpenProject }: Props) {
 
   // ── Open project ──
 
-  const handleOpen = async (pid: string) => {
+  // Open the project in a tab (browser-tab model). The tab's own renderer
+  // does the connecting; if the project is already open, its tab is activated.
+  const handleOpen = async (pid: string, name?: string) => {
     setError('')
-    setBusy(true)
-    setBusyText('Connecting to project...')
-    setStatusMessage('Connecting...')
-
-    const result = await window.api.otConnect(pid)
-    setBusy(false)
-
-    if (result.success) {
-      const store = useAppStore.getState()
-      if (result.files) store.setFiles(result.files as any)
-      if (result.project) store.setOverleafProject(result.project)
-      if (result.docPathMap && result.pathDocMap) store.setDocMaps(result.docPathMap, result.pathDocMap)
-      if (result.fileRefs) store.setFileRefs(result.fileRefs)
-      if (result.rootFolderId) store.setRootFolderId(result.rootFolderId)
-      store.setOverleafProjectId(pid)
-      store.setConnectionState('connected')
-      if (result.syncDir) store.setSyncDir(result.syncDir)
-      if (result.cachedPdfPath) store.setPdfPath(result.cachedPdfPath)
-      setStatusMessage('Connected')
-      onOpenProject(pid)
-    } else {
-      setStatusMessage('Connection failed')
-      setError(result.message || 'Failed to connect')
-    }
+    await window.api.openProjectTab(pid, name)
   }
 
   // ── Modal actions ──
@@ -526,7 +501,7 @@ export default function ProjectList({ onOpenProject }: Props) {
   }
 
   const handleLogout = async () => {
-    await window.api.otDisconnect()
+    await window.api.overleafLogout()
     useAppStore.getState().resetEditorState()
     useAppStore.getState().setScreen('login')
   }
@@ -923,7 +898,7 @@ export default function ProjectList({ onOpenProject }: Props) {
                           />
                         </span>
                         <span className="pl-col-name">
-                          <button className="pl-project-link" onClick={() => handleOpen(p.id)}>{p.name}</button>
+                          <button className="pl-project-link" onClick={() => handleOpen(p.id, p.name)}>{p.name}</button>
                           <span className="pl-row-tags">
                             {projectTags(p).map((tag) => (
                               <span key={tag._id} className="pl-chip">

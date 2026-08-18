@@ -35,6 +35,51 @@ export const activeDocSyncs = new Map<string, OverleafDocSync>()
 // Global remote cursor state — shared between App and Editor
 export const remoteCursors = new Map<string, RemoteCursor & { docId: string }>()
 
+// Set when this window was opened for a specific project (browser-tab model:
+// the list window opens each project in its own window via ?projectId=)
+const initialProjectId = new URLSearchParams(window.location.search).get('projectId')
+
+/** Browser-style tab strip: persistent home tab + one tab per open project.
+ *  Rendered by the home renderer only, in the top TAB_BAR_HEIGHT (38px) strip
+ *  that project views never cover. Hidden entirely when no project is open. */
+function TabBar({ tabs, active }: { tabs: Array<{ id: string; title: string }>; active: string }) {
+  const isMac = navigator.platform.toLowerCase().includes('mac')
+  return (
+    <div className={`wt-bar${isMac ? ' wt-bar-mac' : ''}`}>
+      <button
+        className={`wt-tab wt-home${active === 'home' ? ' active' : ''}`}
+        onClick={() => window.api.tabsActivate('home')}
+        title="Projects"
+      >
+        <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <path d="M3 10.5 12 3l9 7.5" />
+          <path d="M5 9.5V21h14V9.5" />
+        </svg>
+        <span className="wt-tab-title">Projects</span>
+      </button>
+      {tabs.map((t) => (
+        <div
+          key={t.id}
+          className={`wt-tab${active === t.id ? ' active' : ''}`}
+          onClick={() => window.api.tabsActivate(t.id)}
+        >
+          <span className="wt-tab-title">{t.title}</span>
+          <button
+            className="wt-tab-close"
+            title="Close project"
+            onClick={(ev) => {
+              ev.stopPropagation()
+              window.api.tabsClose(t.id)
+            }}
+          >
+            ×
+          </button>
+        </div>
+      ))}
+    </div>
+  )
+}
+
 class ErrorBoundary extends Component<{ children: ReactNode }, { error: Error | null }> {
   state = { error: null as Error | null }
   static getDerivedStateFromError(error: Error) { return { error } }
@@ -65,6 +110,18 @@ export default function App() {
   } = useAppStore()
 
   const [checkingSession, setCheckingSession] = useState(true)
+  const [connectError, setConnectError] = useState('')
+
+  // Tab strip state, mirrored from main (home renderer only)
+  const [tabStrip, setTabStrip] = useState<{ tabs: Array<{ id: string; title: string }>; active: string }>({
+    tabs: [],
+    active: 'home'
+  })
+  useEffect(() => {
+    if (initialProjectId) return // project tabs don't render the strip
+    window.api.tabsList().then(setTabStrip).catch(() => {})
+    return window.api.onTabsChanged(setTabStrip)
+  }, [])
 
   // Prevent Electron from navigating to dropped files
   useEffect(() => {
@@ -77,13 +134,35 @@ export default function App() {
     }
   }, [])
 
-  // Check session on startup
+  // Check session on startup. Project windows (?projectId=) connect straight
+  // into the editor; the list window shows the dashboard.
+  const startupRanRef = useRef(false)
   useEffect(() => {
-    window.api.overleafHasWebSession().then(({ loggedIn }) => {
-      setScreen(loggedIn ? 'projects' : 'login')
+    // Once per window — StrictMode double-invokes effects and a second
+    // ot:connect mid-flight would race the first
+    if (startupRanRef.current) return
+    startupRanRef.current = true
+    window.api.overleafHasWebSession().then(async ({ loggedIn }) => {
+      if (!loggedIn) {
+        setScreen('login')
+        setCheckingSession(false)
+        return
+      }
+      if (initialProjectId) {
+        await connectAndOpen(initialProjectId)
+      } else {
+        setScreen('projects')
+      }
       setCheckingSession(false)
     })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [setScreen])
+
+  // Window title mirrors the open project, like a browser tab
+  const projectName = useAppStore((s) => s.overleafProject?.name)
+  useEffect(() => {
+    document.title = projectName ? `${projectName} — LatteX` : 'LatteX'
+  }, [projectName])
 
   // OT event listeners (always active when in editor)
   useEffect(() => {
@@ -389,8 +468,42 @@ export default function App() {
   const handleLogin = async () => {
     const result = await window.api.overleafWebLogin()
     if (result.success) {
-      setScreen('projects')
+      if (initialProjectId) {
+        setCheckingSession(true)
+        await connectAndOpen(initialProjectId)
+        setCheckingSession(false)
+      } else {
+        setScreen('projects')
+      }
     }
+  }
+
+  // Connect this window to its project and enter the editor (project windows only)
+  const connectAndOpen = async (pid: string) => {
+    setConnectError('')
+    setStatusMessage('Connecting to project...')
+    const result = await window.api.otConnect(pid)
+    if (!result.success) {
+      if (result.message === 'already_open') {
+        // Another window owns this project and was focused — close this one
+        window.api.closeWindow()
+        return
+      }
+      setConnectError(result.message || 'Failed to connect')
+      return
+    }
+    const store = useAppStore.getState()
+    if (result.files) store.setFiles(result.files as any)
+    if (result.project) store.setOverleafProject(result.project)
+    if (result.docPathMap && result.pathDocMap) store.setDocMaps(result.docPathMap, result.pathDocMap)
+    if (result.fileRefs) store.setFileRefs(result.fileRefs)
+    if (result.rootFolderId) store.setRootFolderId(result.rootFolderId)
+    store.setOverleafProjectId(pid)
+    store.setConnectionState('connected')
+    if (result.syncDir) store.setSyncDir(result.syncDir)
+    if (result.cachedPdfPath) store.setPdfPath(result.cachedPdfPath)
+    setStatusMessage('Connected')
+    await handleOpenProject(pid)
   }
 
   const handleOpenProject = async (pid: string) => {
@@ -448,6 +561,12 @@ export default function App() {
   }
 
   const handleBackToProjects = async () => {
+    if (initialProjectId) {
+      // Project window: closing it is the "back" action — the list window
+      // stays open, and main tears the session down on 'closed'
+      window.api.closeWindow()
+      return
+    }
     await window.api.otDisconnect()
     activeDocSyncs.forEach((s) => s.destroy())
     activeDocSyncs.clear()
@@ -461,6 +580,35 @@ export default function App() {
         <div className="welcome-drag-bar" />
         <div className="welcome-content">
           <div className="overleaf-spinner" />
+          {initialProjectId && <p style={{ marginTop: 16 }}>Opening project...</p>}
+        </div>
+      </div>
+    )
+  }
+
+  // Project window failed to connect — offer retry or close
+  if (initialProjectId && connectError && screen !== 'editor') {
+    return (
+      <div className="welcome-screen">
+        <div className="welcome-drag-bar" />
+        <div className="welcome-content">
+          <h2>Could not open project</h2>
+          <p style={{ color: '#a33', maxWidth: 480, wordBreak: 'break-word' }}>{connectError}</p>
+          <div style={{ display: 'flex', gap: 12, marginTop: 16 }}>
+            <button
+              className="btn btn-primary"
+              onClick={async () => {
+                setCheckingSession(true)
+                await connectAndOpen(initialProjectId)
+                setCheckingSession(false)
+              }}
+            >
+              Retry
+            </button>
+            <button className="btn" onClick={() => window.api.closeWindow()}>
+              Close Tab
+            </button>
+          </div>
         </div>
       </div>
     )
@@ -497,12 +645,19 @@ export default function App() {
     )
   }
 
-  // Project list screen
+  // Project list screen (home tab). The tab strip only appears once a
+  // project is open — home alone shows no tab bar.
   if (screen === 'projects') {
+    const showTabBar = tabStrip.tabs.length > 0
     return (
       <>
         <ModalProvider />
-        <ProjectList onOpenProject={handleOpenProject} />
+        <div className={`home-root${showTabBar ? ' with-tab-bar' : ''}`}>
+          {showTabBar && <TabBar tabs={tabStrip.tabs} active={tabStrip.active} />}
+          <div className="home-content">
+            <ProjectList />
+          </div>
+        </div>
       </>
     )
   }
