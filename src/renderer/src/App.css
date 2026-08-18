@@ -1090,6 +1090,52 @@ html, body, #root {
   color: var(--text-primary);
 }
 
+/* ── Update toast (bottom-right card on the home page) ─────────── */
+
+.update-toast {
+  position: fixed;
+  bottom: 16px;
+  right: 16px;
+  z-index: 1000;
+  width: 320px;
+  padding: 14px 16px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-md);
+  font-size: 13px;
+  color: var(--text-primary);
+}
+
+.update-toast-title {
+  font-weight: 600;
+  margin-bottom: 10px;
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.update-toast-link {
+  border: none;
+  background: none;
+  padding: 0;
+  font-size: 12px;
+  color: var(--accent-blue);
+  cursor: pointer;
+  text-decoration: underline;
+}
+
+.update-toast-body {
+  color: var(--text-secondary);
+  margin-bottom: 10px;
+}
+
+.update-toast-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
 /* ── Projects Page ──────────────────────────────────────────── */
 
 .projects-page {

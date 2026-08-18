@@ -39,6 +39,94 @@ export const remoteCursors = new Map<string, RemoteCursor & { docId: string }>()
 // the list window opens each project in its own window via ?projectId=)
 const initialProjectId = new URLSearchParams(window.location.search).get('projectId')
 
+/** Update-available card (home renderer only). Checks GitHub Releases once
+ *  per launch; "Skip this version" is remembered in localStorage. */
+function UpdateToast() {
+  const [info, setInfo] = useState<{
+    version: string
+    releaseUrl: string
+    assetName?: string
+    assetUrl?: string
+    assetSize?: number
+  } | null>(null)
+  const [phase, setPhase] = useState<'idle' | 'downloading' | 'done' | 'error'>('idle')
+
+  useEffect(() => {
+    window.api.updateCheck().then((r) => {
+      if (!r.available || !r.version) return
+      if (localStorage.getItem('lattex-skip-version') === r.version) return
+      setInfo({
+        version: r.version,
+        releaseUrl: r.releaseUrl || 'https://github.com/YurenHao0426/lattex/releases',
+        assetName: r.assetName,
+        assetUrl: r.assetUrl,
+        assetSize: r.assetSize
+      })
+    }).catch(() => {})
+  }, [])
+
+  if (!info) return null
+
+  const sizeMb = info.assetSize ? ` (${(info.assetSize / 1024 / 1024).toFixed(0)} MB)` : ''
+
+  const download = async () => {
+    if (!info.assetUrl || !info.assetName) {
+      // No installer for this platform in the release — open the page
+      window.api.openExternal(info.releaseUrl)
+      return
+    }
+    setPhase('downloading')
+    const r = await window.api.updateDownload(info.assetUrl, info.assetName)
+    setPhase(r.success ? 'done' : 'error')
+  }
+
+  return (
+    <div className="update-toast">
+      <div className="update-toast-title">
+        Update available: v{info.version}
+        <button className="update-toast-link" onClick={() => window.api.openExternal(info.releaseUrl)}>
+          release notes
+        </button>
+      </div>
+      {phase === 'done' ? (
+        <div className="update-toast-body">
+          Installer opened — quit LatteX and replace the app to finish updating.
+        </div>
+      ) : phase === 'error' ? (
+        <div className="update-toast-body">
+          Download failed — you can get it from the releases page instead.
+        </div>
+      ) : (
+        <div className="update-toast-actions">
+          <button className="btn btn-primary btn-sm" onClick={download} disabled={phase === 'downloading'}>
+            {phase === 'downloading' ? 'Downloading…' : `Download${sizeMb}`}
+          </button>
+          <button className="btn btn-sm" onClick={() => setInfo(null)}>Later</button>
+          <button
+            className="btn btn-sm"
+            onClick={() => {
+              localStorage.setItem('lattex-skip-version', info.version)
+              setInfo(null)
+            }}
+          >
+            Skip this version
+          </button>
+        </div>
+      )}
+      {(phase === 'done' || phase === 'error') && (
+        <div className="update-toast-actions">
+          <button className="btn btn-sm" onClick={() => setInfo(null)}>Dismiss</button>
+          {phase === 'error' && (
+            <button className="btn btn-sm" onClick={() => window.api.openExternal(info.releaseUrl)}>
+              Open releases page
+            </button>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
 /** Browser-style tab strip: persistent home tab + one tab per open project.
  *  Rendered by the home renderer only, in the top TAB_BAR_HEIGHT (38px) strip
  *  that project views never cover. Hidden entirely when no project is open. */
@@ -657,6 +745,7 @@ export default function App() {
           <div className="home-content">
             <ProjectList />
           </div>
+          <UpdateToast />
         </div>
       </>
     )

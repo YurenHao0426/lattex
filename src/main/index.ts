@@ -4,7 +4,7 @@
 import { app, BrowserWindow, WebContentsView, ipcMain, dialog, shell, net } from 'electron'
 import { join, basename, dirname, relative, extname, delimiter } from 'path'
 import { copyFile, readFile, writeFile, mkdir as mkdirAsync, unlink, readdir, stat, rename as fsRename, rm, cp } from 'fs/promises'
-import { existsSync } from 'fs'
+import { existsSync, createWriteStream } from 'fs'
 import { spawn } from 'child_process'
 import * as pty from 'node-pty'
 import { OverleafSocket, type RootFolder, type SubFolder, type JoinDocResult } from './overleafSocket'
@@ -2427,6 +2427,108 @@ function fetchBinary(url: string, cookie?: string): Promise<ArrayBuffer> {
     req.end()
   })
 }
+
+// ── Update check (GitHub Releases) ──────────────────────────────
+//
+// The app is unsigned, so electron-updater's silent auto-update is not an
+// option on macOS. Instead: check the latest GitHub release on launch, and
+// let the user one-click download the right installer for their platform.
+
+const GITHUB_RELEASES_API = 'https://api.github.com/repos/YurenHao0426/lattex/releases/latest'
+
+function compareVersions(a: string, b: string): number {
+  const pa = a.split('.').map((n) => parseInt(n, 10) || 0)
+  const pb = b.split('.').map((n) => parseInt(n, 10) || 0)
+  for (let i = 0; i < 3; i++) {
+    const d = (pa[i] || 0) - (pb[i] || 0)
+    if (d !== 0) return d > 0 ? 1 : -1
+  }
+  return 0
+}
+
+ipcMain.handle('update:check', async () => {
+  try {
+    const body = await new Promise<string>((resolve, reject) => {
+      const req = net.request(GITHUB_RELEASES_API)
+      req.setHeader('User-Agent', 'LatteX-Updater')
+      req.setHeader('Accept', 'application/vnd.github+json')
+      let data = ''
+      req.on('response', (res) => {
+        if (!res.statusCode || res.statusCode >= 400) {
+          reject(new Error(`HTTP ${res.statusCode}`))
+          return
+        }
+        res.on('data', (c) => { data += c.toString() })
+        res.on('end', () => resolve(data))
+      })
+      req.on('error', reject)
+      req.end()
+    })
+
+    const release = JSON.parse(body) as {
+      tag_name?: string
+      body?: string
+      html_url?: string
+      assets?: Array<{ name: string; browser_download_url: string; size: number }>
+    }
+    const latest = (release.tag_name || '').replace(/^v/, '')
+    const current = app.getVersion()
+    if (!latest || compareVersions(latest, current) <= 0) {
+      return { available: false, current }
+    }
+
+    const wanted = process.platform === 'darwin' ? /-arm64\.dmg$/ : /-win-x64\.exe$/
+    const asset = (release.assets || []).find((a) => wanted.test(a.name))
+    return {
+      available: true,
+      current,
+      version: latest,
+      notes: (release.body || '').slice(0, 2000),
+      releaseUrl: release.html_url || 'https://github.com/YurenHao0426/lattex/releases',
+      assetName: asset?.name,
+      assetUrl: asset?.browser_download_url,
+      assetSize: asset?.size
+    }
+  } catch (e) {
+    // Offline / rate-limited — stay quiet, this is a background convenience
+    return { available: false, current: app.getVersion(), error: String(e) }
+  }
+})
+
+// Download the installer to ~/Downloads and open it (mounts the DMG /
+// launches the NSIS installer) — the user takes it from there.
+ipcMain.handle('update:download', async (_e, url: string, name: string) => {
+  // Only accept release assets of this repo — the URL originates from our
+  // own update:check, but the IPC boundary shouldn't trust the renderer
+  if (!/^https:\/\/github\.com\/YurenHao0426\/lattex\/releases\/download\//.test(url)) {
+    return { success: false, message: 'invalid url' }
+  }
+  const dest = join(app.getPath('downloads'), basename(name))
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const req = net.request(url)   // net follows the S3 redirect
+      req.setHeader('User-Agent', 'LatteX-Updater')
+      req.on('response', (res) => {
+        if (!res.statusCode || res.statusCode >= 400) {
+          reject(new Error(`HTTP ${res.statusCode}`))
+          return
+        }
+        const out = createWriteStream(dest)
+        res.on('data', (c) => out.write(c))
+        res.on('end', () => out.end(() => resolve()))
+        res.on('error', reject)
+        out.on('error', reject)
+      })
+      req.on('error', reject)
+      req.end()
+    })
+    await shell.openPath(dest)
+    return { success: true, path: dest }
+  } catch (e) {
+    unlink(dest).catch(() => {})
+    return { success: false, message: String(e) }
+  }
+})
 
 /// ── Shell: open external ─────────────────────────────────────────
 

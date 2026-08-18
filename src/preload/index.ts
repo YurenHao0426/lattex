@@ -385,6 +385,21 @@ const api = {
   },
   closeWindow: () => ipcRenderer.invoke('window:close') as Promise<void>,
 
+  // Update check (GitHub Releases)
+  updateCheck: () =>
+    ipcRenderer.invoke('update:check') as Promise<{
+      available: boolean
+      current: string
+      version?: string
+      notes?: string
+      releaseUrl?: string
+      assetName?: string
+      assetUrl?: string
+      assetSize?: number
+    }>,
+  updateDownload: (url: string, name: string) =>
+    ipcRenderer.invoke('update:download', url, name) as Promise<{ success: boolean; path?: string; message?: string }>,
+
   // Shell
   openExternal: (url: string) => ipcRenderer.invoke('shell:openExternal', url),
   showInFinder: (path: string) => ipcRenderer.invoke('shell:showInFinder', path),
