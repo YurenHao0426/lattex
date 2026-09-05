@@ -212,14 +212,27 @@ export default function FileTree() {
 
   // ── Project view actions (Overleaf entities) ──
 
-  const handleSetMainDoc = () => {
+  const handleSetMainDoc = async () => {
     if (!ctxMenu) return
     const node = ctxMenu.node
-    if (node.docId) {
-      useAppStore.getState().setMainDocument(node.docId)
-      useAppStore.getState().setStatusMessage(`Main document set to ${node.name}`)
-    }
     closeMenu()
+    if (!node.docId) return
+    const store = useAppStore.getState()
+    // Optimistic local update; the official settings endpoint persists it
+    // project-wide (and broadcasts rootDocUpdated to collaborators)
+    store.setMainDocument(node.docId)
+    const projectId = store.overleafProjectId
+    if (!projectId) return
+    const r = await window.api.overleafSetRootDoc(projectId, node.docId)
+    if (r.success) {
+      const st = useAppStore.getState()
+      if (st.overleafProject) {
+        st.setOverleafProject({ ...st.overleafProject, rootDocId: node.docId })
+      }
+      st.setStatusMessage(`Main document set to ${node.name}`)
+    } else {
+      useAppStore.getState().setStatusMessage(`Failed to set main document (${r.message || 'error'})`)
+    }
   }
 
   const handleCopyPath = () => {

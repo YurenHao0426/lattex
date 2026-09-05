@@ -1785,6 +1785,17 @@ export class FileSyncBridge {
     return Object.entries(this.fileRefPathMap).map(([id, path]) => ({ id, path }))
   }
 
+  /** Live docId → relPath lookup — unlike the connect-time project snapshot,
+   *  this includes docs created mid-session */
+  getDocPath(docId: string): string | undefined {
+    return this.docPathMap[docId]
+  }
+
+  /** Live relPath → docId lookup (see getDocPath) */
+  getDocIdForPath(relPath: string): string | undefined {
+    return this.pathDocMap[relPath]
+  }
+
   /** Check if a doc's content is known */
   hasDoc(relPath: string): boolean {
     return this.lastKnownContent.has(relPath)

@@ -71,6 +71,7 @@ Claude Code can edit `.tex` files directly — changes sync to Overleaf in real-
 | `send_chat_message` | Send a message to project chat |
 | `list_project_files` | List all project files with sizes |
 | `compile_latex` | Trigger server-side LaTeX compilation |
+| `set_main_file` | Set the project's main document (persists on Overleaf) |
 | `get_compile_errors` | Get parsed errors from last compile |
 | `get_compile_warnings` | Get parsed warnings from last compile |
 | `get_compile_log` | Get raw compile log output |

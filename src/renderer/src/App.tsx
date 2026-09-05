@@ -309,6 +309,17 @@ export default function App() {
       setStatusMessage('Overleaf session expired — please sign in again')
     })
 
+    // Main document changed (by us or a collaborator) — track it
+    const unsubRootDoc = window.api.onProjectRootDocUpdated?.((docId) => {
+      const store = useAppStore.getState()
+      store.setMainDocument(docId)
+      if (store.overleafProject) {
+        store.setOverleafProject({ ...store.overleafProject, rootDocId: docId })
+      }
+      const name = store.docPathMap[docId]?.split('/').pop()
+      if (name) setStatusMessage(`Main document: ${name}`)
+    })
+
     // Keep the file tree in sync with Overleaf project-entity socket events.
     const unsubEntityCreated = window.api.onSyncEntityCreated((data) => {
       applyEntityCreated(data)
@@ -427,6 +438,7 @@ export default function App() {
       unsubCursorDisconnected()
       unsubFileStatus?.()
       unsubAuthExpired?.()
+      unsubRootDoc?.()
       remoteCursors.clear()
       stopAutocompleteSync()
     }

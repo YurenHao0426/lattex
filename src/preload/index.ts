@@ -177,6 +177,13 @@ const api = {
     ipcRenderer.invoke('overleaf:removeProjectsFromTag', tagId, projectIds) as Promise<{ success: boolean; message?: string }>,
   overleafSetProjectState: (projectId: string, action: 'archive' | 'unarchive' | 'trash' | 'untrash' | 'delete' | 'leave') =>
     ipcRenderer.invoke('overleaf:setProjectState', projectId, action) as Promise<{ success: boolean; message?: string }>,
+  overleafSetRootDoc: (projectId: string, docId: string) =>
+    ipcRenderer.invoke('overleaf:setRootDoc', projectId, docId) as Promise<{ success: boolean; message?: string }>,
+  onProjectRootDocUpdated: (cb: (docId: string) => void) => {
+    const handler = (_e: Electron.IpcRendererEvent, docId: string) => cb(docId)
+    ipcRenderer.on('project:rootDocUpdated', handler)
+    return () => { ipcRenderer.removeListener('project:rootDocUpdated', handler) }
+  },
   overleafRenameProject: (projectId: string, newName: string) =>
     ipcRenderer.invoke('overleaf:renameProject', projectId, newName) as Promise<{ success: boolean; message?: string }>,
   overleafCloneProject: (projectId: string, projectName: string, tags?: string[]) =>

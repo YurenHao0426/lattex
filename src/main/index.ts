@@ -43,6 +43,10 @@ interface ProjectSession {
   mcpCompileRequestPath: string | null
   mcpCompileActive: boolean
   compileInProgress: Promise<{ success: boolean; log: string; pdfPath: string }> | null
+  // Cached once at connect, used whenever the agent guide is (re)written
+  mcpServerPath: string
+  currentUserName: string
+  ownerName: string
 }
 
 const sessions = new Map<number, ProjectSession>()          // webContents.id → session
@@ -90,20 +94,44 @@ async function writeMcpState(s: ProjectSession): Promise<void> {
   } catch { /* ignore */ }
 }
 
-async function prepareMcpServerPath(tmpDir: string): Promise<string> {
-  const sourcePath = app.isPackaged
-    ? join(app.getAppPath() + '.unpacked', 'out', 'mcp', 'lattex.mjs')
-    : join(__dirname, '..', '..', 'src', 'mcp', 'lattex.mjs')
+async function prepareMcpServerPath(): Promise<string> {
+  // Copy to a stable, project-INDEPENDENT path. Agents like Codex store the
+  // registered command globally — a per-project path goes stale the moment
+  // the project's temp dir is cleaned up ("connection closed" on handshake).
+  // The server resolves the actual project from its runtime cwd instead.
+  // (Also avoids persisting unsigned-macOS App Translocation paths.)
+  //
+  // The copy must be the esbuild BUNDLE (dependencies inlined) — the raw
+  // source imports @modelcontextprotocol/sdk, which is unresolvable from
+  // ~/.lattex where there is no node_modules.
+  const stableDir = join(app.getPath('home'), '.lattex')
+  await mkdirAsync(stableDir, { recursive: true })
+  const serverPath = join(stableDir, 'lattex-mcp.mjs')
 
-  if (!app.isPackaged) return sourcePath
+  if (app.isPackaged) {
+    await copyFile(join(app.getAppPath() + '.unpacked', 'out', 'mcp', 'lattex.mjs'), serverPath)
+    return serverPath
+  }
 
-  // Unsigned macOS apps can be launched from an App Translocation path. That
-  // path is not stable enough to persist in .mcp.json, so copy the bundled MCP
-  // server into the live project directory and point Claude at the copy.
-  const mcpDir = join(tmpDir, '.lattex')
-  await mkdirAsync(mcpDir, { recursive: true })
-  const serverPath = join(mcpDir, 'lattex-mcp.mjs')
-  await copyFile(sourcePath, serverPath)
+  // Dev: `npm run dev` doesn't produce the bundle — build it if missing or
+  // older than the source.
+  const repoRoot = join(__dirname, '..', '..')
+  const bundled = join(repoRoot, 'out', 'mcp', 'lattex.mjs')
+  const source = join(repoRoot, 'src', 'mcp', 'lattex.mjs')
+  const [bStat, sStat] = await Promise.all([
+    stat(bundled).catch(() => null),
+    stat(source).catch(() => null)
+  ])
+  if (!bStat || (sStat && sStat.mtimeMs > bStat.mtimeMs)) {
+    await new Promise<void>((resolve) => {
+      const proc = spawn('npx', [
+        'esbuild', source, '--bundle', '--platform=node', '--format=esm', `--outfile=${bundled}`
+      ], { cwd: repoRoot })
+      proc.on('close', () => resolve())
+      proc.on('error', () => resolve())
+    })
+  }
+  await copyFile(bundled, serverPath)
   return serverPath
 }
 
@@ -158,6 +186,142 @@ function writeMcpOnlineUsers(s: ProjectSession): void {
     const users = Array.from(s.mcpOnlineUsers.entries()).map(([id, u]) => ({ id, ...u }))
     writeFile(join(s.mcpStateDir, '.lattex-online-users.json'), JSON.stringify(users)).catch(() => {})
   }, 500)
+}
+
+/**
+ * Write .claude/CLAUDE.md + AGENTS.md for this session. Called at connect AND
+ * whenever the main document changes ('rootDocUpdated') — a stale "Main file"
+ * line makes agents "helpfully" compile the old root via main_file overrides.
+ * Uses the bridge's live maps so mid-session docs are included.
+ */
+async function writeAgentGuides(s: ProjectSession): Promise<void> {
+  const project = s.sock.projectData?.project
+  if (!project || !s.mcpStateDir) return
+
+  let rootDocPath = s.fileSyncBridge?.getDocPath(project.rootDoc_id) || ''
+  let texFiles: string[]
+  if (s.fileSyncBridge) {
+    texFiles = s.fileSyncBridge.getAllDocContents().map((d) => d.path).filter((p) => p.endsWith('.tex')).sort()
+  } else {
+    const { docPathMap } = walkRootFolder(project.rootFolder)
+    if (!rootDocPath) rootDocPath = docPathMap[project.rootDoc_id] || ''
+    texFiles = Object.values(docPathMap).filter((p) => p.endsWith('.tex')).sort()
+  }
+  if (!rootDocPath) rootDocPath = 'main.tex'
+  const fileListStr = texFiles.map((p) => `- \`${p}\``).join('\n')
+
+  // One guide, two consumers: .claude/CLAUDE.md (Claude Code's native
+  // location) and AGENTS.md at the project root (the cross-tool standard
+  // read by Codex, Cursor, Gemini CLI, etc.). AGENTS.md is excluded from
+  // Overleaf sync alongside CLAUDE.md/.mcp.json.
+  const agentGuide = `# ${project.name} — Overleaf Project
+
+> **IMPORTANT — MANDATORY FIRST STEPS (do this EVERY conversation before ANY edits):**
+>
+> 1. **Read \`${rootDocPath}\`** to discover the paper structure — identify every \\\\input{} and \\\\include{} file.
+> 2. **Read EVERY file** found in step 1, one by one. This means reading the full content of each .tex file listed below. Do NOT skip any file. Do NOT skim. You need to understand the paper's argument, notation, macro usage, and conventions before touching anything.
+> 3. **Run \`get_comments\`** to check for reviewer comments, TODOs, or ongoing discussions.
+> 4. Only AFTER completing steps 1–3 may you proceed with the user's request.
+>
+> This is a live Overleaf project — your edits appear to collaborators in real-time. Careless changes to a document you haven't fully read WILL break things and waste collaborators' time.
+
+This is a LaTeX project synced from Overleaf via LatteX. All files here are **bidirectionally synced** — your edits appear on Overleaf in real-time, and vice versa.
+${s.currentUserName ? `\n**You are logged in as: ${s.currentUserName}** — this is the name that appears on comments and edits. The project owner is ${s.ownerName}.` : `\n**Project owner**: ${s.ownerName}`}
+
+## Project Structure
+
+- **Main file**: \`${rootDocPath}\` (the root document for compilation — this file is rewritten automatically when the main document changes; use \`set_main_file\` to change it, do NOT pass a stale \`main_file\` to compile_latex)
+${fileListStr ? `- **TeX files**:\n${fileListStr}` : ''}
+
+## Rules
+
+- **NEVER edit without reading first.** You must understand what you are changing. Read the relevant file(s) fully before making any modification.
+- **Match existing conventions.** Follow the notation, formatting, macro usage, and sectioning style already established in the document. Do NOT impose your own style.
+- **Do NOT reorganize, rename labels, or refactor macros** unless explicitly asked.
+- **Make targeted edits only.** Modify the specific parts that need changing. Do not rewrite surrounding paragraphs for style.
+- **One logical change at a time.** Do not mix unrelated edits in a single pass.
+- **Compile after changes.** Use \`compile_latex\` after every edit. If compilation fails, use \`get_compile_errors\` and fix immediately before proceeding.
+- **Respond to comments.** When you address a comment, use \`reply_to_comment\` to explain what you changed, then \`resolve_comment\`. Never delete others' comments.
+
+## MCP Tools
+
+You have MCP tools to interact with Overleaf. Use them proactively.
+
+### Comments
+- **get_comments**: Read comments. Pass \`file\` to filter, \`include_resolved\` for all.
+- **resolve_comment**: Resolve a comment by \`thread_id\`.
+- **reopen_comment**: Reopen a resolved comment.
+- **reply_to_comment**: Reply to a comment thread.
+- **delete_comment**: Permanently delete a comment thread.
+
+### Chat
+- **get_chat_messages**: Read project chat history.
+- **send_chat_message**: Send a message to project chat.
+
+### Project
+- **list_project_files**: List all files with sizes.
+- **get_online_users**: See who is currently online in this project.
+
+### Compilation
+- **compile_latex**: Trigger LaTeX compilation on Overleaf server. Returns status + error summary. Compiles the project's main document; only pass \`main_file\` for a deliberate one-off compile of a different root.
+- **set_main_file**: Permanently change the project's main document (root .tex file) — persists on Overleaf, same as Menu → Main document in the web editor.
+- **get_compile_errors**: Get parsed errors from last compile (file, line, message).
+- **get_compile_warnings**: Get parsed warnings from last compile.
+- **get_compile_log**: Get full raw log. Pass \`tail: N\` for last N lines only.
+
+### PDF
+- **read_compiled_pdf**: Get the path to the compiled PDF. After calling this, use your **Read** tool on the returned path to visually inspect the PDF. Use the \`pages\` parameter (e.g. \`"1-3"\`) to read specific pages. This lets you verify formatting, figures, tables, and layout.
+
+### Bibliography
+- **search_citation**: Search academic papers by title, topic, or author (Semantic Scholar). Returns matching papers with ready-to-use BibTeX entries that can be pasted directly into a \`.bib\` file. **Note:** Without a Semantic Scholar API key configured in LatteX settings, requests will likely be rate-limited (HTTP 429). With a key, the rate limit is 1 request/second.
+- **search_openalex**: Search scholarly works via OpenAlex (broader/faster-moving coverage, citation counts, venues). **Citation policy:** OpenAlex metadata lags, so BibTeX is cross-checked against Semantic Scholar — only entries marked "Semantic Scholar ✓" are authoritative. Entries marked "OpenAlex only ⚠" must be verified with a web search (publisher page / arXiv) before citing; very recent papers may be missing from both indexes.
+
+### Workflows
+
+#### Comment Workflow
+1. Use \`get_comments\` to see what reviewers have flagged
+2. Read the relevant sections to understand context
+3. Edit the .tex files to address the feedback
+4. Use \`reply_to_comment\` to explain what you changed
+5. Use \`resolve_comment\` to mark it as done
+
+#### Compile-Debug Workflow
+1. Edit .tex files
+2. Use \`compile_latex\` to compile
+3. If errors: use \`get_compile_errors\` for details, fix them, recompile
+4. If warnings: use \`get_compile_warnings\` to review
+5. To check visual output: use \`read_compiled_pdf\`, then Read the returned path with \`pages: "1-3"\`
+
+#### Bibliography Workflow
+1. Use \`search_citation\` (Semantic Scholar) or \`search_openalex\` (broader coverage) to find references
+2. If the entry is marked "OpenAlex only ⚠", verify it with a web search before using it
+3. Copy the BibTeX entry into the \`.bib\` file
+4. Use \`\\cite{key}\` in the \`.tex\` file
+5. Compile to verify the citation renders correctly
+
+## Workspace
+
+The \`claude-workspace/\` directory is your private scratch space. It is **not synced to Overleaf** — use it freely for:
+- **Notes and plans** — draft outlines, track TODOs, keep analysis notes
+- **Experiments** — test LaTeX snippets, try alternative formulations, prototype figures
+- **Scripts** — helper scripts for data processing, bibliography management, etc.
+
+**Important**: Always ask the user before running experiments or creating files in \`claude-workspace/\`. This directory persists across sessions for the same project.
+
+## Agent Setup (MCP)
+
+The tools above come from LatteX's MCP server (standard stdio MCP — works with any MCP-capable agent):
+
+- **Claude Code**: auto-configured. \`.mcp.json\` in this directory registers the \`lattex\` server and \`.claude/settings.json\` pre-approves its tools. Just run \`claude\`.
+- **Codex CLI**: one-time setup (works for every LatteX project — the server detects the project from the directory you launch codex in):
+  \`\`\`
+  codex mcp add lattex -- node "${s.mcpServerPath}"
+  \`\`\`
+  If you previously registered a project-specific path, run \`codex mcp remove lattex\` first. Approve \`lattex\` tool calls when Codex prompts.
+- **Any other MCP client**: stdio transport, command \`node "${s.mcpServerPath}"\` launched in the project directory (or set \`LATTEX_PROJECT_DIR\`).
+`
+  await writeFile(join(s.mcpStateDir, '.claude', 'CLAUDE.md'), agentGuide)
+  await writeFile(join(s.mcpStateDir, 'AGENTS.md'), agentGuide)
 }
 
 function createListWindow(): void {
@@ -1224,7 +1388,10 @@ async function otConnectImpl(e: Electron.IpcMainInvokeEvent, projectId: string) 
     commentContextRefreshTimer: null,
     mcpCompileRequestPath: null,
     mcpCompileActive: false,
-    compileInProgress: null
+    compileInProgress: null,
+    mcpServerPath: '',
+    currentUserName: '',
+    ownerName: ''
   }
   sessions.set(s.webContentsId, s)
   sessionsByProject.set(projectId, s)
@@ -1283,6 +1450,17 @@ async function otConnectImpl(e: Electron.IpcMainInvokeEvent, projectId: string) 
           s.mcpOnlineUsers.delete(clientId)
           writeMcpOnlineUsers(s)
         }
+      } else if (name === 'rootDocUpdated') {
+        // Main document changed (by us via /settings, or by a collaborator) —
+        // keep the project snapshot current so compiles use the new root
+        const newRootDocId = args[0] as string
+        if (sock.projectData && newRootDocId) {
+          sock.projectData.project.rootDoc_id = newRootDocId
+        }
+        sessionSend(s, 'project:rootDocUpdated', newRootDocId)
+        // Rewrite CLAUDE.md/AGENTS.md — a stale "Main file" line makes agents
+        // compile the old root via main_file overrides
+        writeAgentGuides(s).catch(() => {})
       } else if (name === 'new-chat-message') {
         sessionSend(s, 'chat:newMessage', args[0])
       } else if (
@@ -1343,7 +1521,8 @@ async function otConnectImpl(e: Electron.IpcMainInvokeEvent, projectId: string) 
     // temp dir so .mcp.json never contains a stale App Translocation path.
     let mcpServerPath = ''
     try {
-      mcpServerPath = await prepareMcpServerPath(tmpDir)
+      mcpServerPath = await prepareMcpServerPath()
+      s.mcpServerPath = mcpServerPath
       await writeFile(join(tmpDir, '.mcp.json'), JSON.stringify({
         mcpServers: {
           lattex: {
@@ -1363,132 +1542,18 @@ async function otConnectImpl(e: Electron.IpcMainInvokeEvent, projectId: string) 
     mkdirAsync(join(tmpDir, 'claude-workspace'), { recursive: true }).catch(() => {})
     // Write .claude/ dir with CLAUDE.md + settings (dotfile dir = excluded from sync)
     mkdirAsync(join(tmpDir, '.claude'), { recursive: true }).then(async () => {
-    const rootDocPath = docPathMap[projectResult.project.rootDoc_id] || 'main.tex'
-    const texFiles = Object.values(docPathMap).filter((p: string) => p.endsWith('.tex'))
-    const fileListStr = texFiles.map((p: string) => `- \`${p}\``).join('\n')
-
-    // Fetch current user's name for CLAUDE.md
-    let currentUserName = ''
+    // Fetch current user's name once for the agent guide
     try {
       const userResult = await overleafFetch('/user/settings')
       if (userResult.ok && userResult.data) {
         const u = userResult.data as { first_name?: string; last_name?: string; email?: string }
-        currentUserName = [u.first_name, u.last_name].filter(Boolean).join(' ') || u.email || ''
+        s.currentUserName = [u.first_name, u.last_name].filter(Boolean).join(' ') || u.email || ''
       }
     } catch { /* non-fatal */ }
-    const ownerName = [projectResult.project.owner.first_name, projectResult.project.owner.last_name].filter(Boolean).join(' ')
+    s.ownerName = [projectResult.project.owner.first_name, projectResult.project.owner.last_name].filter(Boolean).join(' ')
 
-    // One guide, two consumers: .claude/CLAUDE.md (Claude Code's native
-    // location) and AGENTS.md at the project root (the cross-tool standard
-    // read by Codex, Cursor, Gemini CLI, etc.). AGENTS.md is excluded from
-    // Overleaf sync alongside CLAUDE.md/.mcp.json.
-    const agentGuide = `# ${projectResult.project.name} — Overleaf Project
+    await writeAgentGuides(s)
 
-> **IMPORTANT — MANDATORY FIRST STEPS (do this EVERY conversation before ANY edits):**
->
-> 1. **Read \`${rootDocPath}\`** to discover the paper structure — identify every \\\\input{} and \\\\include{} file.
-> 2. **Read EVERY file** found in step 1, one by one. This means reading the full content of each .tex file listed below. Do NOT skip any file. Do NOT skim. You need to understand the paper's argument, notation, macro usage, and conventions before touching anything.
-> 3. **Run \`get_comments\`** to check for reviewer comments, TODOs, or ongoing discussions.
-> 4. Only AFTER completing steps 1–3 may you proceed with the user's request.
->
-> This is a live Overleaf project — your edits appear to collaborators in real-time. Careless changes to a document you haven't fully read WILL break things and waste collaborators' time.
-
-This is a LaTeX project synced from Overleaf via LatteX. All files here are **bidirectionally synced** — your edits appear on Overleaf in real-time, and vice versa.
-${currentUserName ? `\n**You are logged in as: ${currentUserName}** — this is the name that appears on comments and edits. The project owner is ${ownerName}.` : `\n**Project owner**: ${ownerName}`}
-
-## Project Structure
-
-- **Main file**: \`${rootDocPath}\` (this is the root document for compilation)
-${fileListStr ? `- **TeX files**:\n${fileListStr}` : ''}
-
-## Rules
-
-- **NEVER edit without reading first.** You must understand what you are changing. Read the relevant file(s) fully before making any modification.
-- **Match existing conventions.** Follow the notation, formatting, macro usage, and sectioning style already established in the document. Do NOT impose your own style.
-- **Do NOT reorganize, rename labels, or refactor macros** unless explicitly asked.
-- **Make targeted edits only.** Modify the specific parts that need changing. Do not rewrite surrounding paragraphs for style.
-- **One logical change at a time.** Do not mix unrelated edits in a single pass.
-- **Compile after changes.** Use \`compile_latex\` after every edit. If compilation fails, use \`get_compile_errors\` and fix immediately before proceeding.
-- **Respond to comments.** When you address a comment, use \`reply_to_comment\` to explain what you changed, then \`resolve_comment\`. Never delete others' comments.
-
-## MCP Tools
-
-You have MCP tools to interact with Overleaf. Use them proactively.
-
-### Comments
-- **get_comments**: Read comments. Pass \`file\` to filter, \`include_resolved\` for all.
-- **resolve_comment**: Resolve a comment by \`thread_id\`.
-- **reopen_comment**: Reopen a resolved comment.
-- **reply_to_comment**: Reply to a comment thread.
-- **delete_comment**: Permanently delete a comment thread.
-
-### Chat
-- **get_chat_messages**: Read project chat history.
-- **send_chat_message**: Send a message to project chat.
-
-### Project
-- **list_project_files**: List all files with sizes.
-- **get_online_users**: See who is currently online in this project.
-
-### Compilation
-- **compile_latex**: Trigger LaTeX compilation on Overleaf server. Returns status + error summary.
-- **get_compile_errors**: Get parsed errors from last compile (file, line, message).
-- **get_compile_warnings**: Get parsed warnings from last compile.
-- **get_compile_log**: Get full raw log. Pass \`tail: N\` for last N lines only.
-
-### PDF
-- **read_compiled_pdf**: Get the path to the compiled PDF. After calling this, use your **Read** tool on the returned path to visually inspect the PDF. Use the \`pages\` parameter (e.g. \`"1-3"\`) to read specific pages. This lets you verify formatting, figures, tables, and layout.
-
-### Bibliography
-- **search_citation**: Search academic papers by title, topic, or author (Semantic Scholar). Returns matching papers with ready-to-use BibTeX entries that can be pasted directly into a \`.bib\` file. **Note:** Without a Semantic Scholar API key configured in LatteX settings, requests will likely be rate-limited (HTTP 429). With a key, the rate limit is 1 request/second.
-- **search_openalex**: Search scholarly works via OpenAlex (broader/faster-moving coverage, citation counts, venues). **Citation policy:** OpenAlex metadata lags, so BibTeX is cross-checked against Semantic Scholar — only entries marked "Semantic Scholar ✓" are authoritative. Entries marked "OpenAlex only ⚠" must be verified with a web search (publisher page / arXiv) before citing; very recent papers may be missing from both indexes.
-
-### Workflows
-
-#### Comment Workflow
-1. Use \`get_comments\` to see what reviewers have flagged
-2. Read the relevant sections to understand context
-3. Edit the .tex files to address the feedback
-4. Use \`reply_to_comment\` to explain what you changed
-5. Use \`resolve_comment\` to mark it as done
-
-#### Compile-Debug Workflow
-1. Edit .tex files
-2. Use \`compile_latex\` to compile
-3. If errors: use \`get_compile_errors\` for details, fix them, recompile
-4. If warnings: use \`get_compile_warnings\` to review
-5. To check visual output: use \`read_compiled_pdf\`, then Read the returned path with \`pages: "1-3"\`
-
-#### Bibliography Workflow
-1. Use \`search_citation\` (Semantic Scholar) or \`search_openalex\` (broader coverage) to find references
-2. If the entry is marked "OpenAlex only ⚠", verify it with a web search before using it
-3. Copy the BibTeX entry into the \`.bib\` file
-4. Use \`\\cite{key}\` in the \`.tex\` file
-5. Compile to verify the citation renders correctly
-
-## Workspace
-
-The \`claude-workspace/\` directory is your private scratch space. It is **not synced to Overleaf** — use it freely for:
-- **Notes and plans** — draft outlines, track TODOs, keep analysis notes
-- **Experiments** — test LaTeX snippets, try alternative formulations, prototype figures
-- **Scripts** — helper scripts for data processing, bibliography management, etc.
-
-**Important**: Always ask the user before running experiments or creating files in \`claude-workspace/\`. This directory persists across sessions for the same project.
-
-## Agent Setup (MCP)
-
-The tools above come from LatteX's MCP server (standard stdio MCP — works with any MCP-capable agent):
-
-- **Claude Code**: auto-configured. \`.mcp.json\` in this directory registers the \`lattex\` server and \`.claude/settings.json\` pre-approves its tools. Just run \`claude\`.
-- **Codex CLI**: register the server once for this project:
-  \`\`\`
-  codex mcp add lattex -- node "${mcpServerPath}"
-  \`\`\`
-  The path is project-specific — re-run this when switching projects. Approve \`lattex\` tool calls when Codex prompts.
-- **Any other MCP client**: stdio transport, command \`node "${mcpServerPath}"\`.
-`
-    await writeFile(join(tmpDir, '.claude', 'CLAUDE.md'), agentGuide)
-    await writeFile(join(tmpDir, 'AGENTS.md'), agentGuide)
     await writeFile(join(tmpDir, '.claude', 'settings.json'), JSON.stringify({
         permissions: {
           allow: [
@@ -1502,6 +1567,7 @@ The tools above come from LatteX's MCP server (standard stdio MCP — works with
             'mcp__lattex__list_project_files',
             'mcp__lattex__get_online_users',
             'mcp__lattex__compile_latex',
+            'mcp__lattex__set_main_file',
             'mcp__lattex__get_compile_errors',
             'mcp__lattex__get_compile_warnings',
             'mcp__lattex__get_compile_log',
@@ -1929,6 +1995,24 @@ ipcMain.handle('overleaf:setProjectState', async (_e, projectId: string, action:
   return { success: result.ok, message: result.ok ? '' : `HTTP ${result.status}` }
 })
 
+// Set the project's main document — the official web endpoint
+// (POST /project/:id/settings {rootDocId}), which persists project-wide and
+// broadcasts 'rootDocUpdated' to all connected clients (including us).
+ipcMain.handle('overleaf:setRootDoc', async (e, projectId: string, docId: string) => {
+  if (!overleafSessionCookie) return { success: false, message: 'not_logged_in' }
+  const result = await overleafFetch(`/project/${projectId}/settings`, {
+    method: 'POST',
+    body: JSON.stringify({ rootDocId: docId })
+  })
+  if (result.ok) {
+    // Update the snapshot immediately — the socket echo also does this, but
+    // a compile fired right after shouldn't race it
+    const s = getSession(e)
+    if (s?.sock.projectData) s.sock.projectData.project.rootDoc_id = docId
+  }
+  return { success: result.ok, message: result.ok ? '' : `HTTP ${result.status}` }
+})
+
 ipcMain.handle('overleaf:renameProject', async (_e, projectId: string, newName: string) => {
   if (!overleafSessionCookie) return { success: false, message: 'not_logged_in' }
   const result = await overleafFetch(`/project/${projectId}/rename`, {
@@ -2192,11 +2276,16 @@ async function doServerCompileImpl(s: ProjectSession, rootDocId?: string): Promi
   const projectId = s.sock.projectData.project._id
   const effectiveRootDocId = rootDocId || s.sock.projectData.project.rootDoc_id || null
 
-  // Resolve rootResourcePath (file path of root doc) — matches Overleaf web client
+  // Resolve rootResourcePath (file path of root doc) — matches Overleaf web
+  // client. Prefer the bridge's live maps: the connect-time project snapshot
+  // doesn't know docs created mid-session.
   let rootResourcePath: string | undefined
   if (effectiveRootDocId) {
-    const { docPathMap } = walkRootFolder(s.sock.projectData.project.rootFolder)
-    rootResourcePath = docPathMap[effectiveRootDocId]
+    rootResourcePath = s.fileSyncBridge?.getDocPath(effectiveRootDocId)
+    if (!rootResourcePath) {
+      const { docPathMap } = walkRootFolder(s.sock.projectData.project.rootFolder)
+      rootResourcePath = docPathMap[effectiveRootDocId]
+    }
   }
 
   try {
@@ -2355,15 +2444,43 @@ function startMcpCompileWatcher(s: ProjectSession, syncDir: string) {
       const reqData = JSON.parse(await readFile(requestPath, 'utf-8'))
       await unlink(requestPath).catch(() => {})
 
-      console.log('[mcp-compile] compile request received:', reqData.requestId)
+      console.log('[mcp-compile] request received:', reqData.requestId, reqData.action || 'compile')
+
+      // Resolve a relPath to a docId via the bridge's LIVE maps first —
+      // s.mcpPathDocMap shares the same object, but be explicit and also
+      // tolerate a leading "./"
+      const resolveDoc = (relPath?: string): string | undefined => {
+        if (!relPath) return undefined
+        const clean = relPath.replace(/^\.\//, '')
+        return s.fileSyncBridge?.getDocIdForPath(clean) ?? s.mcpPathDocMap[clean]
+      }
+
+      // set-main-file action: persist the project's main document via the
+      // official settings endpoint (no compile)
+      if (reqData.action === 'setMainFile') {
+        const docId = resolveDoc(reqData.mainFile)
+        let outcome: { success: boolean; error?: string }
+        if (!docId) {
+          outcome = { success: false, error: `No document found at path: ${reqData.mainFile}` }
+        } else {
+          const res = await overleafFetch(`/project/${s.projectId}/settings`, {
+            method: 'POST',
+            body: JSON.stringify({ rootDocId: docId })
+          })
+          if (res.ok && s.sock.projectData) s.sock.projectData.project.rootDoc_id = docId
+          outcome = res.ok ? { success: true } : { success: false, error: `HTTP ${res.status}` }
+        }
+        await writeFile(resultPath, JSON.stringify({ requestId: reqData.requestId, ...outcome }))
+        console.log('[mcp-compile] setMainFile result:', JSON.stringify(outcome))
+        return
+      }
 
       // Notify renderer: compile started
       sessionSend(s, 'compile:mcpStarted', null)
 
-      // Resolve main_file to rootDocId if provided
-      let rootDocId: string | undefined
-      if (reqData.mainFile && s.mcpPathDocMap[reqData.mainFile]) {
-        rootDocId = s.mcpPathDocMap[reqData.mainFile]
+      const rootDocId = resolveDoc(reqData.mainFile)
+      if (reqData.mainFile && !rootDocId) {
+        console.log('[mcp-compile] WARNING: main_file not found, compiling project root:', reqData.mainFile)
       }
 
       const result = await doServerCompile(s, rootDocId)

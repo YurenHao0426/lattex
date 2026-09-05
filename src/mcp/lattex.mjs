@@ -16,24 +16,51 @@ import {
 import { readFileSync, readdirSync, statSync, writeFileSync, existsSync, unlinkSync } from 'fs'
 import { join, relative, dirname } from 'path'
 import { fileURLToPath } from 'url'
+import { tmpdir } from 'os'
 import https from 'https'
 
 // ── Project directory resolution ──────────────────────────────
 //
-// Claude Code launches MCP servers with the project as cwd, but other MCP
-// clients (Codex reads global config) may not. The packaged server is copied
-// into <project>/.lattex/lattex-mcp.mjs, so the script's own location also
-// identifies the project. Resolution order: cwd, then script parent dir.
+// The server binary lives at a stable, project-independent path
+// (~/.lattex/lattex-mcp.mjs) so agents register it ONCE; the project is
+// resolved at runtime. Claude Code spawns MCP servers with the project as
+// cwd; other clients (Codex reads global config) may spawn from anywhere.
+// Resolution order:
+//   1. $LATTEX_PROJECT_DIR (explicit override)
+//   2. cwd or any ancestor containing .lattex-mcp.json (agents cd around)
+//   3. the script's parent dir (legacy per-project copy at <project>/.lattex/)
+//   4. the single live LatteX project dir in the OS tmpdir, if exactly one
 
 function resolveProjectDir() {
-  const cwd = process.cwd()
-  if (existsSync(join(cwd, '.lattex-mcp.json'))) return cwd
+  const marker = '.lattex-mcp.json'
+
+  const envDir = process.env.LATTEX_PROJECT_DIR
+  if (envDir && existsSync(join(envDir, marker))) return envDir
+
+  let dir = process.cwd()
+  for (let i = 0; i < 12; i++) {
+    if (existsSync(join(dir, marker))) return dir
+    const parent = dirname(dir)
+    if (parent === dir) break
+    dir = parent
+  }
+
   try {
     const scriptDir = dirname(fileURLToPath(import.meta.url))
     const candidate = dirname(scriptDir) // <project>/.lattex/.. = <project>
-    if (existsSync(join(candidate, '.lattex-mcp.json'))) return candidate
+    if (existsSync(join(candidate, marker))) return candidate
   } catch { /* fall through */ }
-  return cwd
+
+  try {
+    const tmp = tmpdir()
+    const candidates = readdirSync(tmp)
+      .filter((name) => name.startsWith('lattex-'))
+      .map((name) => join(tmp, name))
+      .filter((p) => existsSync(join(p, marker)))
+    if (candidates.length === 1) return candidates[0]
+  } catch { /* fall through */ }
+
+  return process.cwd()
 }
 
 const PROJECT_DIR = resolveProjectDir()
@@ -474,9 +501,23 @@ const TOOLS = [
       properties: {
         main_file: {
           type: 'string',
-          description: 'Optional main .tex file path (e.g. "main.tex"). Uses project default if omitted.'
+          description: 'Optional main .tex file path (e.g. "main.tex") to use as the root for THIS compile only. Uses the project main document if omitted. To change the main document permanently, use set_main_file.'
         }
       }
+    }
+  },
+  {
+    name: 'set_main_file',
+    description: 'Set the project\'s main document (the root .tex file used for compilation). Persists project-wide on Overleaf — same as Menu → Main document in the web editor — and applies to all future compiles.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        file: {
+          type: 'string',
+          description: 'Path of the .tex file to make the main document (e.g. "main.tex" or "sections/root.tex")'
+        }
+      },
+      required: ['file']
     }
   },
   {
@@ -1009,6 +1050,48 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       // ── Compilation ───────────────────────────────
+
+      case 'set_main_file': {
+        const file = args?.file
+        if (!file) return textResult('Error: "file" is required (e.g. "main.tex").')
+        const cwd = PROJECT_DIR
+        const requestPath = join(cwd, '.lattex-compile-request')
+        const resultPath = join(cwd, '.lattex-compile-result')
+        try { unlinkSync(resultPath) } catch {}
+
+        // Route through the LatteX main process — it has the live path→docId
+        // map (including docs created this session) and calls the official
+        // POST /project/:id/settings endpoint
+        const requestId = Date.now().toString(36) + Math.random().toString(36).slice(2, 6)
+        writeFileSync(requestPath, JSON.stringify({
+          requestId,
+          action: 'setMainFile',
+          mainFile: file,
+          timestamp: Date.now()
+        }))
+
+        const start = Date.now()
+        let result = null
+        while (Date.now() - start < 15000) {
+          await new Promise(r => setTimeout(r, 300))
+          try {
+            if (existsSync(resultPath)) {
+              result = JSON.parse(readFileSync(resultPath, 'utf-8'))
+              unlinkSync(resultPath)
+              break
+            }
+          } catch {}
+        }
+
+        if (!result) {
+          try { unlinkSync(requestPath) } catch {}
+          return textResult('Error: LatteX did not respond — is the project open in LatteX?')
+        }
+        if (result.success) {
+          return textResult(`Main document set to "${file}". All future compiles will use it as the root file.`)
+        }
+        return textResult(`Failed to set main document: ${result.error || 'unknown error'}`)
+      }
 
       case 'compile_latex': {
         const mainFile = args?.main_file || null
