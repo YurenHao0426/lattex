@@ -348,6 +348,17 @@ export class OverleafApi {
     }
   }
 
+  /** Clone (copy) a project on Overleaf, returning the new project ID */
+  async copyProject(sourceProjectId: string, newName: string): Promise<string> {
+    const result = await this.requestWithCsrf('POST', `/project/${sourceProjectId}/clone`, {
+      projectName: newName
+    })
+    if (!result.ok || !(result.data as any)?.project_id) {
+      throw new Error(`Copy project failed: HTTP ${result.status}`)
+    }
+    return (result.data as any).project_id
+  }
+
   /** Flush project (ensure OT changes are saved to database) */
   async flushProject(projectId: string): Promise<void> {
     await this.requestWithCsrf('POST', `/project/${projectId}/flush`)

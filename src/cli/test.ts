@@ -1,5 +1,6 @@
 // Tests for CLI arg parsing and diff logic
 import { parseArgs } from './args'
+import { OverleafApi } from './overleafApi'
 import { walkRootFolder } from './fileTree'
 import { join } from 'path'
 import { mkdtemp, writeFile, mkdir, rm } from 'fs/promises'
@@ -229,6 +230,28 @@ l.3 \\usepackage{nonexistent}`
   eq(entries4[0].line, 20, 'overfull line')
 }
 
+// ── copy command arg parsing test ──
+
+function testCopyArgs(): void {
+  console.log('--- copy args ---')
+
+  const r1 = parseArgs(['node', 'cli', 'copy', '6a965e135690947a3be20882', 'My New Project'])
+  eq(r1.command, 'copy', 'copy command')
+  eq(r1.positional, ['6a965e135690947a3be20882', 'My New Project'], 'copy positionals')
+
+  const r2 = parseArgs(['node', 'cli', 'copy', 'My Source', 'My Copy', '--json'])
+  eq(r2.command, 'copy', 'copy command with json')
+  eq(r2.positional, ['My Source', 'My Copy'], 'copy positionals by name')
+  eq(r2.flags.json, true, 'json flag with copy')
+}
+
+// ── OverleafApi.copyProject existence test ──
+
+function testCopyProjectMethod(): void {
+  console.log('--- copyProject method ---')
+  assert(typeof OverleafApi.prototype.copyProject === 'function', 'copyProject is a method on OverleafApi')
+}
+
 // ── Run all tests ──
 
 async function runTests(): Promise<void> {
@@ -237,6 +260,8 @@ async function runTests(): Promise<void> {
   testIsTextFile()
   await testComputeDiff()
   testParseCompileLog()
+  testCopyArgs()
+  testCopyProjectMethod()
 
   console.log(`\n${passed} passed, ${failed} failed`)
   process.exit(failed > 0 ? 1 : 0)

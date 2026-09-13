@@ -186,6 +186,37 @@ async function cmdProjects(flags: Record<string, string | boolean>): Promise<voi
   }
 }
 
+async function cmdCopy(positional: string[], flags: Record<string, string | boolean>): Promise<void> {
+  const sourceRef = positional[0]
+  const newName = positional[1]
+  if (!sourceRef || !newName) {
+    exitWith(EXIT_USAGE, 'Usage: lattex-cli copy <source-id|name> <new-name>')
+  }
+
+  const cookie = await resolveAuth(flags)
+  const api = new OverleafApi(cookie)
+
+  // Resolve project ID from name if needed
+  let sourceId = sourceRef
+  if (!sourceRef.match(/^[0-9a-f]{24}$/)) {
+    const projects = await api.listProjects()
+    const match = projects.find(p => p.name === sourceRef)
+    if (!match) {
+      exitWith(EXIT_ERROR, `Project not found: ${sourceRef}`)
+    }
+    sourceId = match!.id
+  }
+
+  err(`Copying project ${sourceId} as "${newName}"...`)
+  const newId = await api.copyProject(sourceId, newName)
+
+  if (jsonMode) {
+    jsonOut({ ok: true, sourceId, newId, newName })
+  } else {
+    out(`Copied → ${newId} "${newName}"`)
+  }
+}
+
 async function cmdClone(positional: string[], flags: Record<string, string | boolean>): Promise<void> {
   const projectRef = positional[0]
   const targetDir = positional[1]
@@ -693,6 +724,7 @@ Commands:
 
   projects [--json]     List Overleaf projects
 
+  copy <id|name> <name> Copy (clone) a project on Overleaf
   clone <id|name> <dir> Download project to local directory
   pull <dir>            Update local dir from Overleaf
   status <dir>          Show local changes
@@ -725,6 +757,9 @@ async function main(): Promise<void> {
         break
       case 'projects':
         await cmdProjects(parsed.flags)
+        break
+      case 'copy':
+        await cmdCopy(parsed.positional, parsed.flags)
         break
       case 'clone':
         await cmdClone(parsed.positional, parsed.flags)
