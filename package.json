@@ -8,7 +8,7 @@
   "scripts": {
     "dev": "electron-vite dev",
     "build": "electron-vite build && npx esbuild src/mcp/lattex.mjs --bundle --platform=node --format=esm --outfile=out/mcp/lattex.mjs",
-    "build:cli": "npx esbuild src/cli/main.ts --bundle --platform=node --format=esm --target=node18 --outfile=out/cli/lattex-cli.mjs --external:ws --banner:js='#!/usr/bin/env node'",
+    "build:cli": "npx esbuild src/cli/main.ts --bundle --platform=node --format=esm --target=node18 --outfile=out/cli/lattex-cli.mjs --external:ws",
     "typecheck:cli": "npx tsc --project tsconfig.cli.json --noEmit",
     "test:cli": "node --experimental-vm-modules out/cli/test.mjs",
     "preview": "electron-vite preview",
