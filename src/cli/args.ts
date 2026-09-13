@@ -8,13 +8,17 @@ export interface ParsedArgs {
 
 export function parseArgs(argv: string[]): ParsedArgs {
   const args = argv.slice(2)
-  const command = args[0] || ''
+  let command = ''
   const positional: string[] = []
   const flags: Record<string, string | boolean> = {}
 
-  for (let i = 1; i < args.length; i++) {
+  // The command is the first non-flag token, so `lattex-cli --help` and
+  // `lattex-cli --json projects` both work.
+  for (let i = 0; i < args.length; i++) {
     const arg = args[i]
-    if (arg.startsWith('--')) {
+    if (arg === '-h') {
+      flags.help = true
+    } else if (arg.startsWith('--')) {
       const eqIdx = arg.indexOf('=')
       if (eqIdx !== -1) {
         flags[arg.slice(2, eqIdx)] = arg.slice(eqIdx + 1)
@@ -30,6 +34,8 @@ export function parseArgs(argv: string[]): ParsedArgs {
       } else {
         flags[arg.slice(2)] = true
       }
+    } else if (!command) {
+      command = arg
     } else {
       positional.push(arg)
     }
